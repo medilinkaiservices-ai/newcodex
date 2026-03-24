@@ -2,20 +2,24 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>NewCodex</title>
+  <title>AI Chat App</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
 
-  <h2>AI Project Builder</h2>
+<div id="chat-container">
 
-  <textarea id="prompt" rows="6" cols="50" placeholder="Enter prompt..."></textarea>
-  <br><br>
+  <div id="messages"></div>
 
-  <button id="btn">Generate</button>
+  <div id="input-area">
+    <textarea id="user-input" placeholder="Type message..."></textarea>
+    <button id="send-button">Send</button>
+  </div>
 
-  <pre id="output"></pre>
+</div>
 
-  <script src="renderer.js"></script>
+<script src="renderer.js"></script>
 
 </body>
 </html>
