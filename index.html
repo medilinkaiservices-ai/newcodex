@@ -1,25 +1,31 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AI Chat App</title>
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'">
+  <title>NewCodex AI</title>
   <link rel="stylesheet" href="styles.css">
 </head>
-
 <body>
+  <div id="chat-container">
+    <div id="messages"></div>
 
-<div id="chat-container">
+    <!-- Update Notification -->
+    <div id="update-notification" class="hidden">
+      <p id="update-text"></p>
+      <div id="progress-container">
+        <div id="progress-bar"></div>
+      </div>
+    </div>
 
-  <div id="messages"></div>
-
-  <div id="input-area">
-    <textarea id="user-input" placeholder="Type message..."></textarea>
-    <button id="send-button">Send</button>
+    <div id="input-area">
+      <button id="update-btn" class="secondary-btn" title="Check Updates">Upd</button>
+      <select id="model-select"><option value="llama3">Llama 3</option><option value="mistral">Mistral</option></select>
+      <button id="regen-button" class="secondary-btn" title="Regenerate">Regen</button>
+      <textarea id="user-input" placeholder="Type a message..."></textarea>
+      <button id="send-button">Send</button>
+    </div>
   </div>
-
-</div>
-
-<script src="renderer.js"></script>
-
+  <script src="renderer.js"></script>
 </body>
 </html>

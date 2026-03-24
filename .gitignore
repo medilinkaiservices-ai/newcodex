@@ -1,2 +1,13 @@
 node_modules/
 .env
+node_modules
+dist
+*.dll
+*.exe
+*.pak
+locales
+resources
+v8_context_snapshot.bin
+snapshot_blob.bin
+version
+.env

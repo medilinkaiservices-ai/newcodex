@@ -1,16 +1,40 @@
 {
   "name": "newcodex",
   "version": "1.0.0",
-  "description": "Electron Gemini AI App",
+  "description": "Electron Ollama AI App",
+  "author": "Your Name",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.newcodex.app",
+    "productName": "GeminiAIApp",
+    "extraResources": [
+      "./.env"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico",
+      "publish": [
+        {
+          "provider": "github",
+          "owner": "YourGitHubUsername",
+          "repo": "YourRepoName"
+        }
+      ]
+    }
   },
   "devDependencies": {
-    "electron": "^29.0.1"
+    "electron": "^29.0.1",
+    "electron-builder": "^24.13.3"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.10.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "electron-updater": "^6.1.7",
+    "highlight.js": "^11.11.1",
+    "marked": "^4.3.0",
+    "node-fetch": "^2.7.0"
   }
 }

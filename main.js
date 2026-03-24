@@ -1,46 +1,93 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-require('dotenv').config();
+const { autoUpdater } = require('electron-updater');
+const fetch = require('node-fetch');
 
-// Fix for GPU/Cache creation errors on Windows
+// Load .env correctly (for dev + build)
+const envPath = app.isPackaged 
+  ? path.join(process.resourcesPath, '.env') 
+  : path.join(__dirname, '.env');
+
+require('dotenv').config({ path: envPath });
+
+// Fix GPU/cache issues
 app.disableHardwareAcceleration();
-
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 
 function createWindow() {
   const win = new BrowserWindow({
     width: 1000,
     height: 700,
+    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
+      contextIsolation: false,
+      nodeIntegration: true,
+      sandbox: false
     }
   });
 
   win.loadFile('index.html');
-  // win.webContents.openDevTools();
+
+  // Auto update events
+  autoUpdater.on('update-available', () => {
+    win.webContents.send('update-status', { status: 'available' });
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    win.webContents.send('update-status', { 
+      status: 'progress', 
+      percent: progressObj.percent 
+    });
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    win.webContents.send('update-status', { status: 'downloaded' });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    win.webContents.send('update-status', { status: 'not-available' });
+  });
+
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdatesAndNotify();
+  }
 }
 
 app.whenReady().then(() => {
 
-  ipcMain.handle('send-prompt', async (event, prompt) => {
+  // 🔥 MAIN CHANGE → Gemini ❌ → Ollama ✅
+  ipcMain.handle('send-prompt', async (event, prompt, model) => {
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      const res = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: model || 'llama3',
+          prompt: prompt,
+          stream: false
+        })
+      });
 
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      return response.text();
+      const data = await res.json();
+      return data.response;
 
     } catch (err) {
-      return "Error: " + err.message;
+      return "Error: Ollama not running!";
     }
   });
 
-  createWindow();
+  // Update check
+  ipcMain.handle('check-for-updates', () => {
+    if (app.isPackaged) {
+      autoUpdater.checkForUpdatesAndNotify();
+    }
+  });
 
+  ipcMain.on('restart-app', () => {
+    autoUpdater.quitAndInstall();
+  });
+
+  createWindow();
 });
 
 app.on('window-all-closed', () => {
