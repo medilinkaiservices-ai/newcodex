@@ -11,3 +11,4 @@ v8_context_snapshot.bin
 snapshot_blob.bin
 version
 .env
+generated/
