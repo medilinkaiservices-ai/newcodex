@@ -20,8 +20,8 @@
       "publish": [
         {
           "provider": "github",
-          "owner": "YourGitHubUsername",
-          "repo": "YourRepoName"
+          "owner": "medilinkaiservices-ai",
+          "repo": "newcodex"
         }
       ]
     }
