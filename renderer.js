@@ -1,11 +1,14 @@
 const marked = require('marked');
 const hljs = require('highlight.js');
+const { desktopCapturer } = require('electron');
 
-// Configure marked with highlight.js
-const renderer = new marked.Renderer();
-renderer.code = (code, lang) => {
-  const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-  const highlightedCode = hljs.highlight(code, { language, ignoreIllegals: true }).value;
+const markdownRenderer = new marked.Renderer();
+markdownRenderer.code = (code, lang) => {
+  const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext';
+  const highlighted = hljs.highlight(code, {
+    language,
+    ignoreIllegals: true
+  }).value;
 
   return `
     <div class="code-block">
@@ -15,1087 +18,936 @@ renderer.code = (code, lang) => {
           <button class="run-btn">Run</button>
           <button class="diff-btn">Diff</button>
           <button class="save-btn">Save</button>
-          <button class="copy-btn">Copy Code</button>
+          <button class="copy-btn">Copy</button>
         </div>
       </div>
-      <pre><code class="hljs ${language}">${highlightedCode}</code></pre>
-    </div>`;
+      <pre><code class="hljs ${language}">${highlighted}</code></pre>
+    </div>
+  `;
 };
-marked.use({ renderer });
+marked.use({ renderer: markdownRenderer });
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  const messages = document.getElementById('messages');
+  const input = document.getElementById('user-input');
+  const attachmentTray = document.getElementById('attachment-tray');
+  const sendButton = document.getElementById('send-button');
+  const stopButton = document.getElementById('stop-button');
+  const modelSelect = document.getElementById('model-select');
+  const agentModeToggle = document.getElementById('agent-mode-toggle');
+  const fileList = document.getElementById('file-list');
+  const fileSearch = document.getElementById('file-search');
+  const openProjectButton = document.getElementById('open-project-btn');
+  const cloneRepoButton = document.getElementById('clone-repo-btn');
+  const newFileButton = document.getElementById('new-file-btn');
+  const newFolderButton = document.getElementById('new-folder-btn');
+  const runQueueButton = document.getElementById('run-queue-btn');
+  const taskQueueList = document.getElementById('task-queue-list');
+  const sessionName = document.querySelector('.session-name');
+  const providerPill = document.getElementById('provider-pill');
+  const editorContainer = document.getElementById('monaco-editor-container');
+  const editorFilenameLabel = document.getElementById('editor-filename');
+  const editorStatusBar = document.getElementById('editor-status-bar');
+  const previewFrame = document.getElementById('preview-frame');
+  const terminalContainer = document.getElementById('terminal-container');
+  const terminalOutput = document.getElementById('terminal-output');
+  const terminalInput = document.getElementById('terminal-input');
+  const toolRail = document.getElementById('tool-rail');
 
-  const messages = document.getElementById("messages");
-  const input = document.getElementById("user-input");
-  const button = document.getElementById("send-button");
-  const stopButton = document.getElementById("stop-button");
-  const regenButton = document.getElementById("regen-button");
-  const updateButton = document.getElementById("update-btn");
-  const openFolderButton = document.getElementById("open-folder-btn");
-  const changeDirButton = document.getElementById("change-dir-btn");
-  const deployButton = document.getElementById("deploy-btn");
-  const clearChatButton = document.getElementById("clear-chat-btn");
-  const updateNotification = document.getElementById("update-notification");
-  const updateText = document.getElementById("update-text");
-  const progressBar = document.getElementById("progress-bar");
-  const modelSelect = document.getElementById("model-select");
-  const tabChat = document.getElementById("tab-chat");
-  const tabCode = document.getElementById("tab-code");
-  const tabPreview = document.getElementById("tab-preview");
-  const chatView = document.getElementById("chat-view");
-  const codeView = document.getElementById("code-view");
-  const previewView = document.getElementById("preview-view");
-  const previewFrame = document.getElementById("preview-frame");
-  const fileList = document.getElementById("file-list");
-  const fileSearch = document.getElementById("file-search");
-  const scriptsList = document.getElementById("scripts-list");
-  const newFolderBtn = document.getElementById("new-folder-btn");
-  const collapseAllBtn = document.getElementById("collapse-all-btn");
-  const formatBtn = document.getElementById("format-btn");
-  const editorFilenameLabel = document.getElementById("editor-filename");
-  const editorStatusBar = document.getElementById("editor-status-bar");
-  
-  // Terminal elements
-  const terminalInput = document.getElementById("terminal-input");
-  const terminalOutput = document.getElementById("terminal-output");
-  const clearTermBtn = document.getElementById("clear-term");
-  const autoFixBtn = document.getElementById("term-auto-fix");
-  const watchToggle = document.getElementById("watch-mode-toggle");
-  const watchInput = document.getElementById("watch-command-input");
-  const agentModeToggle = document.getElementById("agent-mode-toggle");
-
-  let lastPrompt = "";
-
-  // 🔥 MONACO EDITOR SETUP
-  let editorInstance = null;
-  let diffEditorInstance = null;
-  let currentOpenFileName = null;
   let filesCache = [];
-  let collapsedPaths = new Set();
+  let currentOpenFileName = null;
+  let editorTextarea = null;
+  let lastPrompt = '';
+  let currentProviderMode = 'ollama';
+  let attachedImages = [];
+  let chatHistory = [];
+  let workspaceMemory = {
+    summary: '',
+    preferences: [],
+    recentTasks: [],
+    mistakesToAvoid: [],
+    successfulPatterns: [],
+    knowledgeNotes: []
+  };
+  let taskQueue = [];
+  let queueRunning = false;
+  let projectSummary = null;
 
-  // 🔥 AUTONOMOUS AGENT SYSTEM PROMPT
-  const AGENT_SYSTEM_PROMPT = `
-YOU ARE AN AUTONOMOUS AI AGENT.
-Your goal is to complete the user's task by planning and executing steps.
+  const AGENT_SYSTEM_PROMPT = `You are NewCodex, a Codex-style autonomous engineering agent.
+Use tools deliberately and keep moving the task forward.
+If the task is large, split it into smaller execution slices.
+Do not stop just because the task is broad; reduce it into solvable parts.
+When something fails, recover, patch, and continue.
+Avoid repeating previous mistakes stored in workspace memory.
 
-You have access to these TOOLS. You must output a single, valid JSON object to use a tool.
-
-**TOOLS:**
-
-1.  **think**: Outline your plan or thoughts. This helps you structure your work. Use this first.
-    \`\`\`json
-    {
-      "tool": "think",
-      "plan": [
-        "First, I will do X.",
-        "Next, I will do Y.",
-        "Finally, I will do Z."
-      ]
-    }
-    \`\`\`
-
-2.  **write_file**: Write or overwrite a file.
-    \`\`\`json
-    {
-      "tool": "write_file",
-      "path": "path/to/file.ext",
-      "content": "file content here"
-    }
-    \`\`\`
-
-3.  **read_file**: Read the content of a file.
-    \`\`\`json
-    {
-      "tool": "read_file",
-      "path": "path/to/file.ext"
-    }
-    \`\`\`
-
-4.  **run_command**: Execute a shell command.
-    \`\`\`json
-    {
-      "tool": "run_command",
-      "command": "npm install"
-    }
-    \`\`\`
-
-5.  **git_push**: Stage, commit, and push changes to git. You will be prompted for a final commit message.
-    \`\`\`json
-    {
-      "tool": "git_push",
-      "message": "A descriptive commit message"
-    }
-    \`\`\`
-
-6.  **done**: Use this tool when the task is fully complete.
-    \`\`\`json
-    {
-      "tool": "done",
-      "message": "I have successfully completed the task."
-    }
-    \`\`\`
-
-RULES:
-- OUTPUT ONLY VALID JSON. Do not write markdown text outside the JSON.
-- Do one step at a time. Wait for the result.
-- DO NOT run commands that do not exit (like 'npm start' or 'node server.js') directly. They will freeze the agent. Use build commands or test commands.
-- Check file structure before writing.
+Available JSON tools:
+{"tool":"think","plan":["step 1","step 2"]}
+{"tool":"read_file","path":"src/app.js"}
+{"tool":"write_file","path":"src/app.js","content":"..."}
+{"tool":"run_command","command":"npm test"}
+{"tool":"read_web","url":"https://example.com/docs"}
+{"tool":"capture_screen","message":"Capture the current browser or app screen for visual debugging"}
+{"tool":"done","message":"Task complete"}
 `;
 
-  // 🔥 AGENT LOOP LOGIC
-  async function runAgentLoop(initialGoal) {
-    let conversationHistory = AGENT_SYSTEM_PROMPT + "\n\nUser Task: Execute this plan:\n" + initialGoal;
-    let stepCount = 0;
-    const maxSteps = 15; // Safety limit
-
-    addMessage("🤖 **Agent Mode Activated** - Analyzing task...", "ai");
-
-    // Toggle UI State
-    input.disabled = true;
-    button.classList.add("hidden");
-    stopButton.classList.remove("hidden");
-
-    while (stepCount < maxSteps) {
-      stepCount++;
-      
-      // 1. Get AI Plan/Action
-      const contextData = {
-        fileTree: window.currentProjectFiles || []
-      };
-      
-      // We send the FULL accumulated history as the prompt to maintain state
-      const aiResponse = await window.electronAPI.sendPrompt(conversationHistory, modelSelect.value, contextData);
-      
-      // 2. Parse JSON Response
-      let action = null;
-      try {
-        // Try to find JSON block if AI wraps it in markdown
-        const codeBlockMatch = aiResponse.match(/```json\n([\s\S]*?)\n```/);
-        if (codeBlockMatch) {
-           action = JSON.parse(codeBlockMatch[1]);
-        } else {
-           const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-           if (jsonMatch) {
-             action = JSON.parse(jsonMatch[0]);
-           } else {
-             action = JSON.parse(aiResponse);
-           }
-        }
-      } catch (e) {
-        console.log("Agent parsing error, retrying as text...");
-      }
-
-      // 3. Execute Action
-      if (action) {
-        addMessage(`🤖 Step ${stepCount}: Executing **${action.tool}**...`, "ai");
-        
-        let toolOutput = "";
-
-        if (action.tool === "think") {
-          const planText = "🤖 **Planning...**\n" + action.plan.map(p => `• ${p}`).join('\n');
-          const thinkMessage = messages.lastElementChild;
-          if (thinkMessage.textContent.includes("Executing **think**")) {
-              thinkMessage.innerHTML = marked.parse(planText);
-          }
-          toolOutput = `System: I have formulated a plan. I will now execute the next step.`;
-        }
-        else if (action.tool === "write_file") {
-          await window.electronAPI.createFiles([{ name: action.path, content: action.content }]);
-          toolOutput = `System: Successfully wrote file '${action.path}'.`;
-          addMessage(`📝 Wrote: ${action.path}`, "ai");
-          
-          // Refresh UI
-          await loadFiles();
-          if (action.path === currentOpenFileName) openFileInEditor({name: action.path, content: action.content});
-        } 
-        else if (action.tool === "run_command") {
-          terminalInput.value = action.command;
-          const cmdResult = await window.electronAPI.runCommand(action.command);
-          terminalOutput.innerText += `> ${action.command}\n${cmdResult}\n`;
-          terminalOutput.scrollTop = terminalOutput.scrollHeight;
-          toolOutput = `System: Command '${action.command}' executed. Output:\n${cmdResult}`;
-        }
-        else if (action.tool === "read_file") {
-          const files = await window.electronAPI.readFiles();
-          const targetFile = files.find(f => f.name === action.path);
-          if (targetFile) {
-            // 🔥 SAFETY: Truncate large files to prevent context overflow
-            const contentPreview = targetFile.content.length > 5000 ? targetFile.content.substring(0, 5000) + "\n...[Content Truncated]..." : targetFile.content;
-            toolOutput = `System: Content of '${action.path}':\n\`\`\`\n${contentPreview}\n\`\`\``;
-            addMessage(`📖 Read: ${action.path}`, "ai");
-          } else {
-            toolOutput = `System: File '${action.path}' not found.`;
-            addMessage(`Mw File not found: ${action.path}`, "ai");
-          }
-        }
-        else if (action.tool === "git_push") {
-          // AI asks user permission automatically
-          const commitMsg = prompt(`🤖 Agent wants to push code.\nCommit Message:`, action.message || "Update by AI Agent");
-          
-          if (commitMsg !== null) {
-            const cmd = `git add . && git commit -m "${commitMsg}" && git push`;
-            terminalInput.value = cmd;
-            const cmdResult = await window.electronAPI.runCommand(cmd);
-            
-            terminalOutput.innerText += `> ${cmd}\n${cmdResult}\n`;
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-            toolOutput = `System: Git push executed. Output:\n${cmdResult}`;
-            addMessage(`☁️ **Git Push:** Executed with message "${commitMsg}"`, "ai");
-          } else {
-            toolOutput = `System: User denied git push request.`;
-            addMessage(`Mw Git Push denied by user.`, "ai");
-          }
-        }
-        else if (action.tool === "done") {
-          addMessage(`✅ **Task Completed:** ${action.message}`, "ai");
-          break; // EXIT LOOP
-        }
-
-        // 4. Feed result back to AI
-        // 🔥 SAFETY: Truncate tool output if huge (e.g. npm install logs)
-        if (toolOutput.length > 2000) toolOutput = toolOutput.substring(0, 2000) + "\n...[Output Truncated]";
-        
-        conversationHistory += `\n\nAssistant: ${JSON.stringify(action)}\nSystem: ${toolOutput}`;
-
-      } else {
-        // Fallback if AI just talks
-        addMessage(aiResponse, "ai");
-        conversationHistory += `\n\nAssistant: ${aiResponse}`;
-        // If AI asks a question or stops using tools, we break to let user reply
-        break;
-      }
-      
-      // Short delay to prevent API flooding
-      await new Promise(r => setTimeout(r, 1000));
+  function ensureEditor() {
+    if (editorTextarea) {
+      return editorTextarea;
     }
 
-    if (stepCount >= maxSteps) addMessage("⚠️ Agent stopped (Max steps reached).", "ai");
+    editorContainer.innerHTML = '';
+    editorTextarea = document.createElement('textarea');
+    editorTextarea.id = 'code-editor';
+    editorTextarea.spellcheck = false;
+    editorContainer.appendChild(editorTextarea);
 
-    // Restore UI
-    input.disabled = false;
-    input.value = "";
-    stopButton.classList.add("hidden");
-    button.classList.remove("hidden");
+    const updateCursor = () => {
+      const lines = editorTextarea.value.slice(0, editorTextarea.selectionStart).split('\n');
+      const line = lines.length;
+      const col = lines[lines.length - 1].length + 1;
+      editorStatusBar.textContent = `Ln ${line}, Col ${col}`;
+    };
+
+    editorTextarea.addEventListener('input', updateCursor);
+    editorTextarea.addEventListener('click', updateCursor);
+    editorTextarea.addEventListener('keydown', async (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        if (currentOpenFileName) {
+          await window.electronAPI.createFiles([{ name: currentOpenFileName, content: editorTextarea.value }]);
+          await loadFiles();
+          addTerminalLine(`Saved ${currentOpenFileName}`);
+        }
+      }
+    });
+
+    return editorTextarea;
   }
 
-  function renderPlanOptions(plans) {
-    const container = document.createElement('div');
-    container.className = 'message ai';
+  function addTerminalLine(text) {
+    if (!terminalOutput) {
+      return;
+    }
+    terminalOutput.textContent += `${text}\n`;
+    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+  }
 
-    let html = 'I have a few ideas for how to approach this. Which one do you prefer?<br><br>';
-    html += '<div class="plan-options-container">';
+  function setBusy(isBusy) {
+    input.disabled = isBusy;
+    sendButton.classList.toggle('hidden', isBusy);
+    stopButton.classList.toggle('hidden', !isBusy);
+  }
 
-    plans.forEach((plan, index) => {
-        html += `
-            <div class="plan-option">
-                <h4>${plan.title || `Plan ${index + 1}`}</h4>
-                <p>${plan.description || 'No description provided.'}</p>
-                <button class="plan-execute-btn" data-plan-index="${index}">Execute This Plan</button>
-            </div>
-        `;
-    });
-    html += '</div>';
-    container.innerHTML = html;
-    messages.appendChild(container);
+  function extractResponse(result) {
+    if (typeof result === 'string') {
+      return { provider: 'ollama', text: result };
+    }
+
+    return {
+      provider: result?.provider || 'system',
+      text: result?.response || ''
+    };
+  }
+
+  function updateProviderPill(provider) {
+    const label = provider === 'gemini'
+      ? 'Gemini'
+      : provider === 'ollama'
+        ? 'Ollama'
+        : currentProviderMode === 'gemini+ollama'
+          ? 'Auto'
+          : 'Local';
+
+    if (providerPill) {
+      providerPill.textContent = label;
+    }
+  }
+
+  function addMessage(text, type, provider) {
+    const message = document.createElement('div');
+    message.className = `message ${type}`;
+
+    if (type === 'ai' && provider) {
+      const providerBadge = document.createElement('div');
+      providerBadge.className = 'message-provider';
+      providerBadge.textContent = provider;
+      message.appendChild(providerBadge);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    body.innerHTML = marked.parse(text);
+    message.appendChild(body);
+
+    messages.appendChild(message);
     messages.scrollTop = messages.scrollHeight;
 
-    // Add event listeners to the new buttons
-    container.querySelectorAll('.plan-execute-btn').forEach(button => {
-        button.onclick = (e) => {
-            const planIndex = e.target.getAttribute('data-plan-index');
-            const selectedPlan = plans[planIndex];
-            
-            // Disable all plan buttons after one is chosen
-            container.querySelectorAll('.plan-execute-btn').forEach(btn => {
-              btn.disabled = true;
-              btn.style.backgroundColor = '#555';
-            });
-            e.target.innerText = "Executing...";
-            e.target.style.backgroundColor = '#059669';
-            
-            // Construct the goal from the plan's steps
-            const goal = selectedPlan.steps.join('\n');
-            runAgentLoop(goal);
-        };
-    });
-  }
-
-
-  // 🔥 WATCHER HELPER
-  function triggerWatchCommand() {
-    if (watchToggle && watchToggle.checked) {
-      const cmd = watchInput.value;
-      if (cmd) {
-        terminalInput.value = cmd;
-        terminalInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-      }
-    }
-  }
-
-  function createStandardEditor() {
-    if (typeof monaco === 'undefined') return;
-
-    // Dispose Diff Editor if active
-    if (diffEditorInstance) {
-      diffEditorInstance.dispose();
-      diffEditorInstance = null;
-      document.getElementById('monaco-editor-container').innerHTML = '';
+    const plainText = (text || '').replace(/\s+/g, ' ').trim();
+    if (plainText) {
+      chatHistory.push({
+        role: type === 'user' ? 'user' : 'assistant',
+        text: plainText.slice(0, 2000)
+      });
+      chatHistory = chatHistory.slice(-12);
     }
 
-    // If already exists, just return (or layout)
-    if (editorInstance) {
-      editorInstance.layout();
+    return message;
+  }
+
+  function renderTaskQueue() {
+    if (!taskQueueList) {
       return;
     }
 
-    document.getElementById('monaco-editor-container').innerHTML = '';
-    editorInstance = monaco.editor.create(document.getElementById('monaco-editor-container'), {
-      value: "// Select a file to view code...",
-      language: 'javascript',
-      theme: 'vs-dark',
-      automaticLayout: true,
-      minimap: { enabled: true }
-    });
+    taskQueueList.innerHTML = '';
+    taskQueue.forEach((task) => {
+      const item = document.createElement('div');
+      item.className = `task-item ${task.status}`;
 
-    // 🔥 SAVE SHORTCUT (Ctrl+S)
-    editorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
-      if (currentOpenFileName) {
-        const content = editorInstance.getValue();
-        await window.electronAPI.createFiles([{ name: currentOpenFileName, content: content }]);
-        terminalOutput.innerText += `> Saved file: ${currentOpenFileName}\n`;
-        terminalOutput.scrollTop = terminalOutput.scrollHeight;
-        
-        // Trigger Watch
-        triggerWatchCommand();
-      }
-    });
+      const title = document.createElement('div');
+      title.className = 'task-title';
+      title.textContent = task.title;
+      item.appendChild(title);
 
-    // 🔥 CURSOR POSITION UPDATE
-    editorInstance.onDidChangeCursorPosition((e) => {
-      if (editorStatusBar) {
-        const { lineNumber, column } = e.position;
-        editorStatusBar.textContent = `Ln ${lineNumber}, Col ${column}`;
-      }
-    });
-  }
+      const status = document.createElement('div');
+      status.className = 'task-status';
+      status.textContent = task.status.replace('_', ' ');
+      item.appendChild(status);
 
-  function createDiffEditor(originalContent, modifiedContent, language) {
-    if (typeof monaco === 'undefined') return;
-
-    // Dispose Standard Editor if active
-    if (editorInstance) {
-      editorInstance.dispose();
-      editorInstance = null;
-    }
-    if (diffEditorInstance) {
-      diffEditorInstance.dispose();
-    }
-
-    document.getElementById('monaco-editor-container').innerHTML = '';
-    diffEditorInstance = monaco.editor.createDiffEditor(document.getElementById('monaco-editor-container'), {
-      theme: 'vs-dark',
-      automaticLayout: true,
-      readOnly: false,
-      originalEditable: false
-    });
-
-    diffEditorInstance.setModel({
-      original: monaco.editor.createModel(originalContent, language),
-      modified: monaco.editor.createModel(modifiedContent, language)
-    });
-  }
-
-  if (window.monacoRequire) {
-    window.monacoRequire(['vs/editor/editor.main'], function () {
-      // 🔥 CONFIGURE INTELLISENSE (Node.js)
-      monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
-        noSemanticValidation: false,
-        noSyntaxValidation: false
-      });
-
-      monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-        target: monaco.languages.typescript.ScriptTarget.ES2016,
-        allowNonTsExtensions: true,
-        moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-        allowJs: true
-      });
-
-      // Add basic Node.js types
-      const nodeTypes = `
-        declare module 'fs' {
-          export function readFileSync(path: string, encoding?: string): string;
-          export function writeFileSync(path: string, data: string, options?: any): void;
-          export function existsSync(path: string): boolean;
-          export function mkdirSync(path: string, options?: any): void;
-          export function readdirSync(path: string): string[];
-        }
-        declare module 'path' {
-          export function join(...paths: string[]): string;
-          export function resolve(...paths: string[]): string;
-          export function dirname(path: string): string;
-          export function basename(path: string, ext?: string): string;
-        }
-        declare module 'child_process' {
-          export function exec(command: string, options?: any, callback?: any): any;
-        }
-        declare const process: {
-          platform: string;
-          env: { [key: string]: string };
-          cwd(): string;
+      if (task.status === 'failed') {
+        const retry = document.createElement('button');
+        retry.className = 'mini-action-btn';
+        retry.textContent = 'Retry';
+        retry.onclick = async () => {
+          task.status = 'pending';
+          await persistQueueState();
+          renderTaskQueue();
         };
-        declare const require: (module: string) => any;
-        declare const module: any;
-        declare const __dirname: string;
-      `;
-      monaco.languages.typescript.javascriptDefaults.addExtraLib(nodeTypes, 'ts:filename/node.d.ts');
+        item.appendChild(retry);
+      }
 
-      createStandardEditor();
+      taskQueueList.appendChild(item);
     });
   }
 
-  // Handle Update Events
-  window.electronAPI.onUpdateStatus((data) => {
-    if (data.status === 'available') {
-      updateNotification.classList.remove('hidden');
-      updateText.innerText = "Update available. Downloading...";
-      progressBar.style.width = "0%";
-    } else if (data.status === 'progress') {
-      updateNotification.classList.remove('hidden');
-      progressBar.style.width = data.percent + "%";
-    } else if (data.status === 'downloaded') {
-      updateText.innerText = "Update downloaded. Restarting soon...";
-      progressBar.style.width = "100%";
-      setTimeout(() => window.electronAPI.restartApp(), 3000);
-    }
-  });
-
-  // 🔥 CONTEXT MENU LOGIC
-  let selectedFileForCtx = null;
-  const ctxMenu = document.createElement('div');
-  ctxMenu.id = 'context-menu';
-  ctxMenu.innerHTML = `
-    <div class="ctx-item" id="ctx-rename">Rename</div>
-    <div class="ctx-item" id="ctx-delete" style="color: #ff6b6b;">Delete</div>
-  `;
-  document.body.appendChild(ctxMenu);
-
-  // Close menu on click anywhere
-  document.addEventListener('click', () => {
-    ctxMenu.style.display = 'none';
-  });
-
-  document.getElementById('ctx-rename').onclick = async () => {
-    const newName = prompt(`Rename ${selectedFileForCtx} to:`, selectedFileForCtx);
-    if (newName && newName !== selectedFileForCtx) {
-      await window.electronAPI.renameFile(selectedFileForCtx, newName);
-      loadFiles();
-    }
-  };
-
-  document.getElementById('ctx-delete').onclick = async () => {
-    if (confirm(`Are you sure you want to delete ${selectedFileForCtx}?`)) {
-      await window.electronAPI.deleteFile(selectedFileForCtx);
-      loadFiles();
-      // Clear editor if deleted file was open
-      if (currentOpenFileName === selectedFileForCtx) {
-        currentOpenFileName = null;
-        if (editorInstance) editorInstance.setValue("// File deleted");
-      }
-    }
-  };
-
-  function isFileVisible(path) {
-    const parts = path.split('/');
-    parts.pop(); // Remove self
-    while (parts.length > 0) {
-      if (collapsedPaths.has(parts.join('/'))) return false;
-      parts.pop();
-    }
-    return true;
-  }
-
-  function renderFileList(files) {
-    const isSearching = fileSearch.value.trim().length > 0;
-    fileList.innerHTML = "";
-    files.forEach(file => {
-      // Collapse check: If not searching and parent is collapsed, hide
-      if (!isSearching && !isFileVisible(file.name)) return;
-
-      const div = document.createElement("div");
-      div.className = "file-item" + (file.isDirectory ? " folder" : "");
-      
-      // Indentation logic
-      const depth = file.name.split('/').length - 1;
-      div.style.paddingLeft = (20 + (depth * 10)) + "px";
-
-      // Icon & Name (Show only basename in tree view)
-      const icon = file.isDirectory 
-        ? (collapsedPaths.has(file.name) ? "📁 " : "📂 ") 
-        : "📄 ";
-      div.textContent = icon + file.name.split('/').pop();
-
-      if (!file.isDirectory) {
-        div.onclick = () => openFileInEditor(file);
-        div.draggable = true;
-        
-        // Drag Start
-        div.ondragstart = (e) => {
-          e.dataTransfer.setData("text/plain", file.name);
-          div.style.opacity = "0.5";
-        };
-        
-        div.ondragend = () => {
-          div.style.opacity = "1";
-        };
-      } else {
-        // Folder toggle logic
-        div.onclick = () => {
-          if (collapsedPaths.has(file.name)) collapsedPaths.delete(file.name);
-          else collapsedPaths.add(file.name);
-          filterFiles();
-        };
-
-        // Folder Drop Zone
-        div.ondragover = (e) => {
-          e.preventDefault(); // Allow drop
-          div.classList.add("drag-over");
-        };
-
-        div.ondragleave = () => {
-          div.classList.remove("drag-over");
-        };
-
-        div.ondrop = async (e) => {
-          e.preventDefault();
-          div.classList.remove("drag-over");
-          const draggedFileName = e.dataTransfer.getData("text/plain");
-          
-          if (!draggedFileName) return;
-          
-          // Calculate new path: TargetFolder + OriginalBasename
-          // Example: Drag 'src/utils.js' to 'dist' -> 'dist/utils.js'
-          const fileNameOnly = draggedFileName.split('/').pop();
-          const newPath = file.name + "/" + fileNameOnly; // file.name is the folder path
-
-          if (draggedFileName !== newPath) {
-             if (confirm(`Move '${fileNameOnly}' to '${file.name}'?`)) {
-                await window.electronAPI.renameFile(draggedFileName, newPath);
-                loadFiles();
-             }
-          }
-        };
-      }
-      
-      // Right click handler
-      div.oncontextmenu = (e) => {
-        e.preventDefault();
-        selectedFileForCtx = file.name;
-        ctxMenu.style.top = `${e.clientY}px`;
-        ctxMenu.style.left = `${e.clientX}px`;
-        ctxMenu.style.display = 'block';
-      };
-      
-      fileList.appendChild(div);
+  async function persistQueueState() {
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary,
+      preferences: workspaceMemory.preferences,
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      taskQueue
     });
   }
 
-  // 🔥 LOAD NPM SCRIPTS AUTOMATION
-  function loadNpmScripts(files) {
-    scriptsList.innerHTML = "";
-    const packageJson = files.find(f => f.name === 'package.json');
-    
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson.content);
-        if (pkg.scripts) {
-          Object.keys(pkg.scripts).forEach(scriptName => {
-            const div = document.createElement("div");
-            div.className = "script-item";
-            div.innerText = scriptName;
-            div.title = pkg.scripts[scriptName];
-            div.onclick = () => {
-              // Run script
-              terminalInput.value = `npm run ${scriptName}`;
-              terminalInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-            };
-            scriptsList.appendChild(div);
-          });
-        }
-      } catch (e) { console.error("Error parsing package.json", e); }
-    }
+  async function enqueueTasks(steps) {
+    taskQueue = steps.map((step, index) => ({
+      id: `${Date.now()}-${index}`,
+      title: step,
+      status: 'pending',
+      retries: 0
+    }));
+    await persistQueueState();
+    renderTaskQueue();
   }
 
-  // 🔥 FILE LIST SIDEBAR LOGIC
-  async function loadFiles() {
-    if (!fileList) return;
-    filesCache = await window.electronAPI.readFiles();
-    
-    // Sort: Hierarchical (Alphabetical by path) for proper tree structure
-    filesCache.sort((a, b) => {
-      return a.name.localeCompare(b.name);
-    });
-
-    // Pass file list to global var for context usage if needed
-    window.currentProjectFiles = filesCache.filter(f => !f.isDirectory).map(f => f.name);
-    loadNpmScripts(filesCache);
-
-    filterFiles();
-  }
-
-  function filterFiles() {
-    const query = fileSearch.value.toLowerCase();
-    const filtered = filesCache.filter(f => f.name.toLowerCase().includes(query));
-    renderFileList(filtered);
-  }
-
-  fileSearch.addEventListener('input', filterFiles);
-
-  // 🔥 NEW FOLDER LOGIC
-  if (newFolderBtn) {
-    newFolderBtn.onclick = async () => {
-      const folderName = prompt("Enter folder name:");
-      if (folderName) {
-        await window.electronAPI.createFolder(folderName);
-        loadFiles();
-      }
-    };
-  }
-
-  // 🔥 COLLAPSE ALL LOGIC
-  if (collapseAllBtn) {
-    collapseAllBtn.onclick = () => {
-      filesCache.forEach(f => {
-        if (f.isDirectory) collapsedPaths.add(f.name);
-      });
-      filterFiles();
-    };
-  }
-
-  function openFileInEditor(file) {
-    currentOpenFileName = file.name;
-    if (editorFilenameLabel) editorFilenameLabel.innerText = file.name;
-
-    createStandardEditor();
-    if (editorInstance) {
-      // Determine language
-      let lang = 'plaintext';
-      if (file.name.endsWith('.js')) lang = 'javascript';
-      else if (file.name.endsWith('.html')) lang = 'html';
-      else if (file.name.endsWith('.css')) lang = 'css';
-      else if (file.name.endsWith('.py')) lang = 'python';
-      else if (file.name.endsWith('.json')) lang = 'json';
-      
-      monaco.editor.setModelLanguage(editorInstance.getModel(), lang);
-      editorInstance.setValue(file.content);
-    }
-    switchTab('code');
-  }
-
-  loadFiles();
-
-  const sendMessage = async () => {
-    const text = input.value;
-    if (!text) return;
-
-    lastPrompt = text;
-    addMessage(text, "user");
-    input.value = "";
-
-    // 🔥 NEW "PLAN & EXECUTE" AGENT FLOW
-    if (agentModeToggle && agentModeToggle.checked) {
-      const loadingMessage = addMessage("🤖 Thinking of a plan...", "ai");
-      try {
-          const plansResponse = await window.electronAPI.getPlan(text, modelSelect.value);
-          // Robustly parse JSON, even if it's inside a markdown block
-          const jsonMatch = plansResponse.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) throw new Error("No valid JSON plan found in AI response.");
-
-          const plansData = JSON.parse(jsonMatch[0]);
-          loadingMessage.remove();
-          renderPlanOptions(plansData.plans);
-      } catch (e) {
-          loadingMessage.innerHTML = "Sorry, I couldn't create a valid plan. The AI might be offline or the response was malformed. Please try a different prompt.";
-          console.error("Planning phase failed:", e);
-      }
-      return;
-    }
-
-    // Fallback to old "Normal Chat" flow
-    button.classList.add("hidden");
-    stopButton.classList.remove("hidden");
-
-    await getResponse(text);
-    
-    // Reset Buttons
-    stopButton.classList.add("hidden");
-    button.classList.remove("hidden");
-  };
-
-  const getResponse = async (text) => {
-    const loadingMessage = addMessage("Thinking...", "ai");
-    const model = modelSelect.value;
-    
-    // 🔥 SMART CONTEXT
-    const contextData = {
-      activeFileName: currentOpenFileName,
-      activeFileContent: getEditorContent(),
-      fileTree: window.currentProjectFiles || []
-    };
-
-    const res = await window.electronAPI.sendPrompt(text, model, contextData);
-    loadingMessage.remove();
-    typeMessage(res, "ai");
-    await handleAIResponse(res);
-  };
-
-  stopButton.onclick = async () => {
-    await window.electronAPI.stopGeneration();
-  };
-
-  regenButton.onclick = async () => {
-    if (!lastPrompt) return;
-    
-    const lastMsg = messages.lastElementChild;
-    if (lastMsg && lastMsg.classList.contains("ai")) {
-      lastMsg.remove();
-    }
-    await getResponse(lastPrompt);
-  };
-
-  updateButton.onclick = () => {
-    window.electronAPI.checkForUpdates();
-    updateNotification.classList.remove('hidden');
-    updateText.innerText = "Checking for updates...";
-    progressBar.style.width = "0%";
-  };
-
-  clearChatButton.onclick = () => {
-    messages.innerHTML = "";
-    lastPrompt = "";
-    addMessage("Chat cleared. Ready for new task.", "ai");
-  };
-
-  openFolderButton.onclick = () => {
-    window.electronAPI.openFolder();
-  };
-
-  changeDirButton.onclick = async () => {
-    const newPath = await window.electronAPI.selectDirectory();
-    if (newPath) {
-      addMessage(`📂 Project folder switched to: **${newPath}**`, "ai");
-      loadFiles();
-      messages.innerHTML = ""; // Clear chat on project switch
-    }
-  };
-
-  // 🔥 DEPLOY BUTTON LOGIC
-  if (deployButton) {
-    deployButton.onclick = () => {
-      const platform = prompt("Deploy to Vercel or Netlify? (Enter 'vercel' or 'netlify')", "vercel");
-      if (!platform) return;
-      
-      let cmd = "";
-      if (platform.toLowerCase().includes("vercel")) cmd = "npx vercel --prod";
-      else if (platform.toLowerCase().includes("netlify")) cmd = "npx netlify deploy --prod";
-      
-      if (cmd) {
-        terminalInput.value = cmd;
-        terminalInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-      }
-    };
-  }
-
-  // 🔥 TAB SWITCHING LOGIC
-  function switchTab(tabName) {
-    [tabChat, tabPreview, tabCode].forEach(t => t.classList.remove("active"));
-    [chatView, previewView, codeView].forEach(v => v.classList.add("hidden"));
-
-    if (tabName === 'chat') {
-      tabChat.classList.add("active");
-      chatView.classList.remove("hidden");
-    } else if (tabName === 'preview') {
-      tabPreview.classList.add("active");
-      previewView.classList.remove("hidden");
-    } else if (tabName === 'code') {
-      tabCode.classList.add("active");
-      codeView.classList.remove("hidden");
-    }
-  }
-
-  tabChat.onclick = () => {
-    switchTab('chat');
-  };
-
-  tabPreview.onclick = () => {
-    switchTab('preview');
-  };
-
-  tabCode.onclick = () => {
-    switchTab('code');
-  };
-
-  button.onclick = sendMessage;
-
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      sendMessage();
-    }
-  });
-
-  function addMessage(text, type) {
-    const div = document.createElement("div");
-    div.className = "message " + type;
-    // 🔥 markdown render
-    div.innerHTML = marked.parse(text);
-    messages.appendChild(div);
-    return div;
-  }
-
-  function typeMessage(text, type) {
-    const div = document.createElement("div");
-    div.className = "message " + type;
-    messages.appendChild(div);
-
-    let i = 0;
-    const interval = setInterval(() => {
-      div.innerText += text.charAt(i);
-      messages.scrollTop = messages.scrollHeight;
-      i++;
-      if (i >= text.length) {
-        clearInterval(interval);
-        div.innerHTML = marked.parse(text);
-      }
-    }, 20);
-  }
-
-  async function copyCodeToClipboard(btn) {
-    const codeElement = btn.closest(".code-block").querySelector("code");
-    if (!codeElement) return;
-    await navigator.clipboard.writeText(codeElement.textContent);
-    btn.innerText = "Copied!";
-    setTimeout(() => btn.innerText = "Copy Code", 2000);
-  }
-
-  async function saveCodeToFile(btn) {
-    const codeBlock = btn.closest(".code-block");
-    const code = codeBlock.querySelector("code").innerText;
-    
-    let filename = "untitled.txt";
-    // Attempt to find "File: filename" in the previous element (markdown usually renders it in a <p>)
-    const prev = codeBlock.previousElementSibling;
-    if (prev && prev.textContent.match(/File:\s*(.+)/)) {
-      filename = prev.textContent.match(/File:\s*(.+)/)[1].trim();
-    }
-
-    await window.electronAPI.createFiles([{ name: filename, content: code }]);
-    
-    btn.innerText = "Saved!";
-    setTimeout(() => btn.innerText = "Save", 2000);
-
-    // Trigger Watch
-    triggerWatchCommand();
-  }
-
-  async function runCodeInTerminal(btn) {
-    const codeBlock = btn.closest(".code-block");
-    const code = codeBlock.querySelector("code").innerText;
-    const lang = codeBlock.querySelector(".lang-label").innerText.toLowerCase();
-    
-    let command = "";
-
-    // 1. Shell commands
-    if (['bash', 'sh', 'zsh', 'powershell', 'cmd', 'shell', 'console'].includes(lang)) {
-      command = code;
-    } 
-    // 2. Saved files (JS/Python)
-    else {
-      let filename = null;
-      const prev = codeBlock.previousElementSibling;
-      if (prev && prev.textContent.match(/File:\s*(.+)/)) {
-        filename = prev.textContent.match(/File:\s*(.+)/)[1].trim();
-      }
-
-      if (filename) {
-        if (filename.endsWith('.js')) command = `node ${filename}`;
-        else if (filename.endsWith('.py')) command = `python ${filename}`;
-      }
-    }
-
-    if (command) {
-      terminalInput.value = command;
-      terminalInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-    } else {
-      alert("Cannot run this code automatically. Try pasting it into the terminal.");
-    }
-  }
-
-  async function handleDiffClick(btn) {
-    const codeBlock = btn.closest(".code-block");
-    const newCode = codeBlock.querySelector("code").innerText;
-    
-    let filename = "untitled";
-    const prev = codeBlock.previousElementSibling;
-    if (prev && prev.textContent.match(/File:\s*(.+)/)) {
-      filename = prev.textContent.match(/File:\s*(.+)/)[1].trim();
-    }
-    
-    // Find original content
-    const file = filesCache.find(f => f.name === filename);
-    const originalContent = file ? file.content : "";
-
-    switchTab('code');
-    
-    // Determine language
-    let lang = 'plaintext';
-    if (filename.endsWith('.js')) lang = 'javascript';
-    else if (filename.endsWith('.html')) lang = 'html';
-    else if (filename.endsWith('.css')) lang = 'css';
-    else if (filename.endsWith('.py')) lang = 'python';
-    else if (filename.endsWith('.json')) lang = 'json';
-
-    createDiffEditor(originalContent, newCode, lang);
-    currentOpenFileName = filename;
-  }
-
-  document.addEventListener("click", async (event) => {
-    if (event.target.classList.contains("copy-btn")) {
-      await copyCodeToClipboard(event.target);
-    }
-    if (event.target.classList.contains("save-btn")) {
-      await saveCodeToFile(event.target);
-    }
-    if (event.target.classList.contains("run-btn")) {
-      await runCodeInTerminal(event.target);
-    }
-    if (event.target.classList.contains("diff-btn")) {
-      await handleDiffClick(event.target);
-    }
-  });
-
-  // 🔥 FILE PARSING & CREATION LOGIC
   function parseFiles(aiText) {
     const files = [];
-    // Regex to find "File: filename" followed by a code block
-    const regex = /File:\s*(.+?)\n```[\w]*\n([\s\S]*?)```/g;
+    const regex = /File:\s*(.+?)\n```[\w-]*\n([\s\S]*?)```/g;
     let match;
-
     while ((match = regex.exec(aiText)) !== null) {
       files.push({
         name: match[1].trim(),
         content: match[2].trim()
       });
     }
-
     return files;
   }
 
-  async function handleAIResponse(text) {
-    const files = parseFiles(text);
-    if (files.length > 0) {
-      await window.electronAPI.createFiles(files);
-      // 🔥 Auto-load preview with timestamp to force refresh
-      previewFrame.src = "generated/index.html?t=" + new Date().getTime();
-      loadFiles();
-      alert("Project created 🚀 Check the 'generated' folder!");
-    }
-  }
-
-  // 🔥 TERMINAL LOGIC
-  terminalInput.addEventListener("keydown", async (e) => {
-    if (e.key === "Enter") {
-      const cmd = terminalInput.value;
-      if (!cmd) return;
-      
-      terminalOutput.innerText += `> ${cmd}\n`;
-      terminalInput.value = "";
-      
-      // DANGEROUS COMMAND CHECK (frontend)
-      const blockedCommands = ['rm', 'del', 'format', 'shutdown'];
-      const blockedCommandRegex = new RegExp(`\\b(${blockedCommands.join('|')})\\b`, 'i');
-      if (blockedCommandRegex.test(cmd)) {
-        const match = cmd.match(blockedCommandRegex);
-        terminalOutput.innerText += `Error: Command "${match[0]}" is blocked for safety.\n`;
-        terminalOutput.scrollTop = terminalOutput.scrollHeight;
-        return;
-      }
-      
-      // RISKY COMMAND CONFIRMATION
-      const riskyCommands = ['git reset', 'git clean', 'npm uninstall', 'git checkout .'];
-      if (riskyCommands.some(risk => cmd.includes(risk))) {
-        const proceed = confirm(`⚠️ CAUTION: The command "${cmd}" is potentially destructive.\nAre you sure you want to run it?`);
-        if (!proceed) {
-          terminalOutput.innerText += "Aborted by user.\n";
-          terminalOutput.scrollTop = terminalOutput.scrollHeight;
-          return;
-        }
-      }
-
-      // Execute
-      const result = await window.electronAPI.runCommand(cmd);
-      terminalOutput.innerText += result + "\n";
-      terminalOutput.scrollTop = terminalOutput.scrollHeight;
-    }
-  });
-
-  clearTermBtn.onclick = () => {
-    terminalOutput.innerText = "";
-  };
-
-  // 🔥 AUTO FIX ERROR LOGIC
-  autoFixBtn.onclick = async () => {
-    const terminalContent = terminalOutput.innerText;
-    if (!terminalContent.trim()) {
-      alert("Terminal is empty. Nothing to fix!");
-      return;
-    }
-
-    // Grab the last 1000 characters of terminal output to avoid token limits
-    const errorLog = terminalContent.slice(-2000); 
-    
-    const fixPrompt = `
-I ran a command and encountered an error. 
-Here is the terminal output:
-\`\`\`
-${errorLog}
-\`\`\`
-Please analyze the error and fix the code in the project files to resolve it.
-`;
-    input.value = fixPrompt;
-    button.click(); // Trigger send
-  };
-
-  // 🔥 FORMAT CODE (PRETTIER)
-  if (formatBtn) {
-    formatBtn.onclick = () => {
-      if (!editorInstance) return;
-      
-      const code = editorInstance.getValue();
-      let parser = null;
-      
-      // Map filename extension to Prettier parser
-      if (currentOpenFileName.endsWith('.js') || currentOpenFileName.endsWith('.json')) parser = 'babel';
-      else if (currentOpenFileName.endsWith('.html')) parser = 'html';
-      else if (currentOpenFileName.endsWith('.css')) parser = 'css';
-      
-      if (parser && window.prettier && window.prettierPlugins) {
-        try {
-          const formatted = prettier.format(code, {
-            parser: parser,
-            plugins: window.prettierPlugins,
-            singleQuote: true,
-            tabWidth: 2
-          });
-          editorInstance.setValue(formatted);
-          // Trigger save/watch if needed, or let user save manually
-        } catch (err) {
-          console.error('Prettier formatting failed:', err);
-          alert('Formatting failed: ' + err.message);
-        }
-      } else {
-        alert('Formatting not supported for this file type or Prettier not loaded.');
-      }
+  function getCurrentContext() {
+    return {
+      activeFileName: currentOpenFileName,
+      activeFileContent: editorTextarea ? editorTextarea.value : '',
+      fileTree: filesCache.filter((file) => !file.isDirectory).map((file) => file.name),
+      images: attachedImages,
+      chatHistory
     };
   }
 
+  async function persistMemoryFromPrompt(promptText) {
+    const nextRecentTasks = [...(workspaceMemory.recentTasks || []), promptText].slice(-12);
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary || `User wants NewCodex to behave like Codex: project-aware, action-oriented, able to inspect, create, edit, debug, and finish large tasks by breaking them into smaller parts.${projectSummary ? ` Current project type: ${projectSummary.likelyType}.` : ''}`,
+      preferences: Array.from(new Set([
+        ...(workspaceMemory.preferences || []),
+        'Behave like Codex',
+        'Prefer project inspection and concrete action over refusal',
+        'Use workspace context, files, and tools proactively',
+        'Split large tasks into smaller milestones',
+        'Self-heal after failed attempts and continue',
+        'Support Telugu and English naturally',
+        'Ask permission before app-level self-improvement or updates'
+      ])).slice(0, 12),
+      recentTasks: nextRecentTasks,
+      mistakesToAvoid: Array.from(new Set([
+        ...(workspaceMemory.mistakesToAvoid || []),
+        'Do not say you cannot read files when project tools are available',
+        'Do not auto-refuse large tasks; break them down first',
+        'Do not stop after one failed approach if another reasonable path exists'
+      ])).slice(-12),
+      successfulPatterns: Array.from(new Set([
+        ...(workspaceMemory.successfulPatterns || []),
+        'Use planner -> queue -> execute -> verify flow for large tasks',
+        'Use Gemini first and Ollama fallback when needed',
+        'Keep offline memory so project help continues without internet'
+      ])).slice(-20),
+      knowledgeNotes: Array.from(new Set([
+        ...(workspaceMemory.knowledgeNotes || []),
+        'User prefers Codex-like autonomous coding behavior.',
+        'User wants bilingual Telugu/English chat.',
+        'Self-improvement suggestions need explicit approval before changing app behavior.'
+      ])).slice(-25)
+    });
+  }
+
+  async function syncProjectSummaryToMemory() {
+    projectSummary = await window.electronAPI.getProjectSummary();
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: `Current project root: ${projectSummary.root}. Likely project type: ${projectSummary.likelyType}. Verification commands: ${(projectSummary.verificationCommands || []).join(', ')}.`,
+      preferences: workspaceMemory.preferences,
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      successfulPatterns: workspaceMemory.successfulPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      taskQueue
+    });
+  }
+
+  function renderAttachments() {
+    if (!attachmentTray) {
+      return;
+    }
+
+    attachmentTray.innerHTML = '';
+    attachmentTray.classList.toggle('hidden', attachedImages.length === 0);
+
+    attachedImages.forEach((image) => {
+      const chip = document.createElement('div');
+      chip.className = 'attachment-chip';
+
+      const img = document.createElement('img');
+      img.src = image.dataUrl;
+      img.alt = image.name || 'attachment';
+      chip.appendChild(img);
+
+      const remove = document.createElement('button');
+      remove.className = 'attachment-remove';
+      remove.type = 'button';
+      remove.textContent = 'x';
+      remove.onclick = () => {
+        attachedImages = attachedImages.filter((entry) => entry.id !== image.id);
+        renderAttachments();
+      };
+      chip.appendChild(remove);
+
+      attachmentTray.appendChild(chip);
+    });
+  }
+
+  function fileToAttachment(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        resolve({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          name: file.name || 'clipboard-image',
+          mimeType: file.type || 'image/png',
+          dataUrl: reader.result
+        });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function captureScreenAttachment() {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: {
+        width: 1920,
+        height: 1080
+      }
+    });
+
+    if (!sources.length) {
+      throw new Error('No screen source available.');
+    }
+
+    const source = sources[0];
+    return {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name: 'screen-capture.png',
+      mimeType: 'image/png',
+      dataUrl: source.thumbnail.toDataURL()
+    };
+  }
+
+  async function attachScreenCapture() {
+    const image = await captureScreenAttachment();
+    attachedImages = [...attachedImages, image];
+    renderAttachments();
+    return image;
+  }
+
+  async function handleImagePaste(event) {
+    const items = Array.from(event.clipboardData?.items || []);
+    const imageItems = items.filter((item) => item.type.startsWith('image/'));
+    if (!imageItems.length) {
+      return;
+    }
+
+    event.preventDefault();
+    const images = await Promise.all(
+      imageItems
+        .map((item) => item.getAsFile())
+        .filter(Boolean)
+        .map((file) => fileToAttachment(file))
+    );
+    attachedImages = [...attachedImages, ...images];
+    renderAttachments();
+  }
+
+  async function handleAIResponse(text, options = {}) {
+    const { autoApply = false } = options;
+    const files = parseFiles(text);
+    if (!files.length) {
+      return;
+    }
+
+    if (!autoApply) {
+      addMessage(`Detected ${files.length} proposed file(s). Review them first, then use the code-block Save buttons or Agent mode to apply changes.`, 'ai', 'system');
+      return;
+    }
+
+    await window.electronAPI.createFiles(files);
+    await loadFiles();
+    await refreshPreview();
+    addMessage(`Created ${files.length} file(s).`, 'ai', 'tool');
+  }
+
+  function renderFileList(files) {
+    fileList.innerHTML = '';
+
+    files.forEach((file) => {
+      const item = document.createElement('div');
+      item.className = `file-item${file.isDirectory ? ' folder' : ''}`;
+      item.style.paddingLeft = `${14 + file.name.split('/').length * 10}px`;
+      item.textContent = `${file.isDirectory ? '▸' : '•'} ${file.name.split('/').pop()}`;
+
+      if (file.isDirectory) {
+        item.onclick = () => {
+          const name = file.name;
+          filesCache = filesCache.map((entry) => entry.name === name ? { ...entry, collapsed: !entry.collapsed } : entry);
+          filterFiles();
+        };
+      } else {
+        item.onclick = () => openFile(file);
+        item.oncontextmenu = async (event) => {
+          event.preventDefault();
+          const action = prompt(`Action for ${file.name}: rename or delete`, 'rename');
+          if (action === 'rename') {
+            const nextName = prompt('New file name', file.name);
+            if (nextName && nextName !== file.name) {
+              await window.electronAPI.renameFile(file.name, nextName);
+              await loadFiles();
+            }
+          }
+          if (action === 'delete') {
+            const confirmed = confirm(`Delete ${file.name}?`);
+            if (confirmed) {
+              await window.electronAPI.deleteFile(file.name);
+              await loadFiles();
+            }
+          }
+        };
+      }
+
+      fileList.appendChild(item);
+    });
+  }
+
+  function filterFiles() {
+    const query = fileSearch.value.trim().toLowerCase();
+    const filtered = filesCache.filter((file) => file.name.toLowerCase().includes(query));
+    renderFileList(filtered);
+  }
+
+  async function loadFiles() {
+    filesCache = await window.electronAPI.readFiles();
+    filesCache.sort((a, b) => a.name.localeCompare(b.name));
+    filterFiles();
+  }
+
+  function openFile(file) {
+    currentOpenFileName = file.name;
+    editorFilenameLabel.textContent = file.name;
+    const editor = ensureEditor();
+    editor.value = file.content || '';
+    editor.dispatchEvent(new Event('input'));
+  }
+
+  async function refreshPreview() {
+    if (!previewFrame) {
+      return;
+    }
+
+    const previewUrl = await window.electronAPI.getPreviewUrl();
+    if (previewUrl) {
+      previewFrame.src = previewUrl;
+      return;
+    }
+
+    previewFrame.srcdoc = `
+      <html>
+        <body style="margin:0;font-family:Segoe UI,system-ui;background:#0f172a;color:#cbd5e1;display:grid;place-items:center;height:100vh;">
+          <div style="text-align:center;max-width:520px;padding:24px;">
+            <h2 style="margin:0 0 8px;">No preview available</h2>
+            <p style="margin:0;color:#94a3b8;">Create an index.html file, or build a web app into dist/ or build/ to preview it here.</p>
+          </div>
+        </body>
+      </html>
+    `;
+  }
+
+  async function runTerminalCommand(command) {
+    if (terminalContainer) {
+      terminalContainer.classList.remove('hidden');
+    }
+    addTerminalLine(`> ${command}`);
+    const output = await window.electronAPI.runCommand(command);
+    addTerminalLine(output);
+    return output;
+  }
+
+  async function getResponse(text) {
+    const loading = addMessage('Thinking...', 'ai', 'system');
+    try {
+      const result = extractResponse(await window.electronAPI.sendPrompt(text, modelSelect.value, getCurrentContext()));
+      loading.remove();
+      updateProviderPill(result.provider);
+      addMessage(result.text, 'ai', result.provider);
+      await handleAIResponse(result.text, { autoApply: false });
+    } catch (error) {
+      loading.remove();
+      addMessage(`Error: ${error.message}`, 'ai', 'system');
+    }
+  }
+
+  async function runAgentFlow(task) {
+    const planning = addMessage('Planning...', 'ai', 'system');
+    const result = extractResponse(await window.electronAPI.getPlan(task, modelSelect.value, getCurrentContext()));
+    planning.remove();
+    updateProviderPill(result.provider);
+
+    const planMatch = result.text.match(/\{[\s\S]*\}/);
+    if (!planMatch) {
+      addMessage(result.text, 'ai', result.provider);
+      return;
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(planMatch[0]);
+    } catch (error) {
+      addMessage('Planner returned malformed JSON.', 'ai', 'system');
+      return;
+    }
+
+    const plan = parsed.plans?.[0];
+    if (!plan) {
+      addMessage('No plan returned.', 'ai', 'system');
+      return;
+    }
+
+    const planText = [`**${plan.title}**`, plan.description, ...(plan.steps || []).map((step, index) => `${index + 1}. ${step}`)].join('\n\n');
+    addMessage(planText, 'ai', result.provider);
+    await enqueueTasks(plan.steps || [task]);
+    await executeTaskQueue();
+  }
+
+  async function runAgentLoop(steps) {
+    let conversationHistory = `${AGENT_SYSTEM_PROMPT}\n\nUser task:\n${steps.join('\n')}`;
+
+    for (let count = 0; count < 12; count += 1) {
+      const result = extractResponse(await window.electronAPI.sendPrompt(conversationHistory, modelSelect.value, getCurrentContext()));
+      let action = null;
+
+      try {
+        const codeMatch = result.text.match(/```json\n([\s\S]*?)\n```/);
+        action = codeMatch ? JSON.parse(codeMatch[1]) : JSON.parse(result.text.match(/\{[\s\S]*\}/)[0]);
+      } catch (error) {
+        addMessage(result.text, 'ai', result.provider);
+        break;
+      }
+
+      if (!action?.tool) {
+        addMessage(result.text, 'ai', result.provider);
+        break;
+      }
+
+      let toolOutput = '';
+      if (action.tool === 'think') {
+        toolOutput = (action.plan || []).join('\n');
+        addMessage(`Working plan:\n\n${toolOutput}`, 'ai', 'tool');
+      } else if (action.tool === 'read_file') {
+        toolOutput = await window.electronAPI.readFile(action.path);
+        addMessage(`Read \`${action.path}\``, 'ai', 'tool');
+      } else if (action.tool === 'write_file') {
+        await window.electronAPI.createFiles([{ name: action.path, content: action.content || '' }]);
+        await loadFiles();
+        toolOutput = `Wrote ${action.path}`;
+        addMessage(toolOutput, 'ai', 'tool');
+      } else if (action.tool === 'run_command') {
+        toolOutput = await runTerminalCommand(action.command);
+      } else if (action.tool === 'read_web') {
+        const webResult = await window.electronAPI.readWebPage(action.url);
+        toolOutput = webResult.ok ? webResult.content : `Web read failed: ${webResult.content}`;
+        addMessage(`Read web page: \`${action.url}\``, 'ai', 'tool');
+      } else if (action.tool === 'capture_screen') {
+        await attachScreenCapture();
+        toolOutput = 'Captured the current screen and attached it to context.';
+        addMessage(action.message || 'Captured screen for visual context.', 'ai', 'tool');
+      } else if (action.tool === 'done') {
+        addMessage(action.message || 'Task completed.', 'ai', 'tool');
+        break;
+      } else {
+        addMessage(result.text, 'ai', result.provider);
+        break;
+      }
+
+      conversationHistory += `\n\nAssistant: ${JSON.stringify(action)}\nSystem: ${toolOutput.slice(0, 5000)}`;
+    }
+  }
+
+  async function executeSingleTask(task) {
+    task.status = 'in_progress';
+    await persistQueueState();
+    renderTaskQueue();
+    addMessage(`Executing task: ${task.title}`, 'ai', 'tool');
+    try {
+      await runAgentLoop([task.title]);
+      if (projectSummary?.verificationCommands?.length) {
+        const verifyCommand = projectSummary.verificationCommands[0];
+        addMessage(`Verifying task with \`${verifyCommand}\``, 'ai', 'tool');
+        const verifyOutput = await runTerminalCommand(verifyCommand);
+        if (/error|failed|exception/i.test(verifyOutput)) {
+          task.status = 'failed';
+          addMessage(`Verification reported issues for: ${task.title}`, 'ai', 'system');
+          await persistQueueState();
+          renderTaskQueue();
+          return;
+        }
+      }
+      task.status = 'completed';
+    } catch (error) {
+      task.retries = (task.retries || 0) + 1;
+      if (task.retries <= 2) {
+        task.status = 'pending';
+        addMessage(`Task failed, retrying (${task.retries}/2): ${task.title}`, 'ai', 'system');
+      } else {
+        task.status = 'failed';
+        addMessage(`Task failed: ${task.title}\n\n${error.message}`, 'ai', 'system');
+      }
+    }
+    await persistQueueState();
+    renderTaskQueue();
+  }
+
+  async function executeTaskQueue() {
+    if (queueRunning || !taskQueue.length) {
+      return;
+    }
+
+    queueRunning = true;
+    try {
+      for (const task of taskQueue) {
+        if (task.status === 'completed') {
+          continue;
+        }
+        await executeSingleTask(task);
+        if (task.status === 'pending') {
+          await executeSingleTask(task);
+        }
+        if (task.status === 'pending') {
+          await executeSingleTask(task);
+        }
+      }
+    } finally {
+      queueRunning = false;
+    }
+  }
+
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text && attachedImages.length === 0) {
+      return;
+    }
+
+    lastPrompt = text || '[image attachment]';
+    addMessage(text || `Attached ${attachedImages.length} image(s).`, 'user');
+    input.value = '';
+    setBusy(true);
+
+    try {
+      await persistMemoryFromPrompt(text || '[image attachment]');
+      if (agentModeToggle.checked) {
+        await runAgentFlow(text);
+      } else {
+        await getResponse(text);
+      }
+      attachedImages = [];
+      renderAttachments();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openProject() {
+    const selected = await window.electronAPI.selectDirectory();
+    if (!selected) {
+      return;
+    }
+    sessionName.textContent = selected.split('\\').pop();
+    addMessage(`Project folder switched to **${selected}**`, 'ai', 'system');
+    await loadFiles();
+    await refreshPreview();
+    await syncProjectSummaryToMemory();
+  }
+
+  async function cloneRepository() {
+    const repoUrl = prompt('Repository URL');
+    if (!repoUrl) {
+      return;
+    }
+    addMessage(`Cloning **${repoUrl}**...`, 'ai', 'tool');
+    const result = await window.electronAPI.cloneRepository(repoUrl);
+    addMessage(result.message || (result.ok ? 'Repository cloned.' : 'Clone failed.'), 'ai', result.ok ? 'tool' : 'system');
+    if (result.ok && result.path) {
+      sessionName.textContent = result.path.split('\\').pop();
+      await loadFiles();
+      await refreshPreview();
+      await syncProjectSummaryToMemory();
+    }
+  }
+
+  async function createNewFile() {
+    const fileName = prompt('New file path', 'src/index.js');
+    if (!fileName) {
+      return;
+    }
+    await window.electronAPI.createFiles([{ name: fileName, content: '' }]);
+    await loadFiles();
+    const file = filesCache.find((entry) => entry.name === fileName);
+    if (file) {
+      openFile(file);
+    }
+  }
+
+  async function createNewFolder() {
+    const folderName = prompt('New folder path', 'src');
+    if (!folderName) {
+      return;
+    }
+    await window.electronAPI.createFolder(folderName);
+    await loadFiles();
+  }
+
+  async function copyCodeToClipboard(button) {
+    const code = button.closest('.code-block')?.querySelector('code')?.textContent || '';
+    await navigator.clipboard.writeText(code);
+    button.textContent = 'Copied';
+    setTimeout(() => {
+      button.textContent = 'Copy';
+    }, 1200);
+  }
+
+  async function saveCodeToFile(button) {
+    const block = button.closest('.code-block');
+    const code = block?.querySelector('code')?.textContent || '';
+    const previous = block?.previousElementSibling?.textContent || '';
+    const match = previous.match(/File:\s*(.+)/);
+    const filename = match ? match[1].trim() : 'generated.txt';
+    await window.electronAPI.createFiles([{ name: filename, content: code }]);
+    await loadFiles();
+  }
+
+  async function runCodeInTerminal(button) {
+    const block = button.closest('.code-block');
+    const code = block?.querySelector('code')?.textContent || '';
+    const lang = (block?.querySelector('.lang-label')?.textContent || '').toLowerCase();
+    const previous = block?.previousElementSibling?.textContent || '';
+    const match = previous.match(/File:\s*(.+)/);
+    const filename = match ? match[1].trim() : '';
+
+    let command = '';
+    if (['bash', 'sh', 'zsh', 'powershell', 'cmd', 'shell', 'console'].includes(lang)) {
+      command = code;
+    } else if (filename.endsWith('.js')) {
+      command = `node ${filename}`;
+    } else if (filename.endsWith('.py')) {
+      command = `python ${filename}`;
+    }
+
+    if (command) {
+      await runTerminalCommand(command);
+    }
+  }
+
+  function showDiff(button) {
+    const block = button.closest('.code-block');
+    const newCode = block?.querySelector('code')?.textContent || '';
+    const previous = block?.previousElementSibling?.textContent || '';
+    const match = previous.match(/File:\s*(.+)/);
+    const filename = match ? match[1].trim() : 'untitled';
+    const existing = filesCache.find((file) => file.name === filename);
+    const editor = ensureEditor();
+
+    currentOpenFileName = filename;
+    editorFilenameLabel.textContent = `${filename} (diff)`;
+    editor.value = `--- current ---\n${existing?.content || ''}\n\n--- proposed ---\n${newCode}`;
+    editor.dispatchEvent(new Event('input'));
+  }
+
+  function renderToolRail(presets) {
+    if (!toolRail) {
+      return;
+    }
+    toolRail.innerHTML = '';
+    presets.forEach((preset) => {
+      const button = document.createElement('button');
+      button.className = 'tool-chip';
+      button.textContent = preset.label;
+      button.onclick = async () => {
+        await runTerminalCommand(preset.command);
+      };
+      toolRail.appendChild(button);
+    });
+
+    const screenButton = document.createElement('button');
+    screenButton.className = 'tool-chip';
+    screenButton.textContent = 'Capture Screen';
+    screenButton.onclick = async () => {
+      await attachScreenCapture();
+      addMessage('Screen capture added to the composer.', 'ai', 'tool');
+    };
+    toolRail.appendChild(screenButton);
+  }
+
+  sendButton.onclick = sendMessage;
+  stopButton.onclick = async () => {
+    await window.electronAPI.stopGeneration();
+    setBusy(false);
+    addMessage('Generation stopped.', 'ai', 'system');
+  };
+
+  openProjectButton?.addEventListener('click', openProject);
+  cloneRepoButton?.addEventListener('click', cloneRepository);
+  newFileButton?.addEventListener('click', createNewFile);
+  newFolderButton?.addEventListener('click', createNewFolder);
+  runQueueButton?.addEventListener('click', executeTaskQueue);
+
+  fileSearch.addEventListener('input', filterFiles);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      sendMessage();
+    }
+  });
+
+  document.addEventListener('keydown', async (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'c') {
+      return;
+    }
+
+    const selection = window.getSelection()?.toString() || '';
+    if (!selection.trim()) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selection);
+    } catch (error) {
+      console.error('Copy failed', error);
+    }
+  });
+
+  input.addEventListener('paste', handleImagePaste);
+
+  terminalInput?.addEventListener('keydown', async (event) => {
+    if (event.key === 'Enter') {
+      const command = terminalInput.value.trim();
+      terminalInput.value = '';
+      if (command) {
+        await runTerminalCommand(command);
+      }
+    }
+  });
+
+  document.addEventListener('click', async (event) => {
+    if (event.target.classList.contains('copy-btn')) {
+      await copyCodeToClipboard(event.target);
+    } else if (event.target.classList.contains('save-btn')) {
+      await saveCodeToFile(event.target);
+    } else if (event.target.classList.contains('run-btn')) {
+      await runCodeInTerminal(event.target);
+    } else if (event.target.classList.contains('diff-btn')) {
+      showDiff(event.target);
+    }
+  });
+
+  window.electronAPI.onUpdateStatus((data) => {
+    const updateText = document.getElementById('update-text');
+    const progressBar = document.getElementById('progress-bar');
+    const updateNotification = document.getElementById('update-notification');
+    updateNotification.classList.remove('hidden');
+
+    if (data.status === 'available') {
+      updateText.textContent = 'Update available. Downloading...';
+    } else if (data.status === 'progress') {
+      updateText.textContent = 'Downloading update...';
+      progressBar.style.width = `${data.percent}%`;
+    } else if (data.status === 'downloaded') {
+      updateText.textContent = 'Update ready. Restarting...';
+      progressBar.style.width = '100%';
+      setTimeout(() => window.electronAPI.restartApp(), 2500);
+    } else if (data.status === 'not-available') {
+      updateText.textContent = 'Already up to date.';
+      progressBar.style.width = '100%';
+    }
+  });
+
+  const projectState = await window.electronAPI.getProjectState();
+  currentProviderMode = projectState.providerMode;
+  workspaceMemory = projectState.memory || workspaceMemory;
+  projectSummary = projectState.projectSummary || null;
+  taskQueue = Array.isArray(workspaceMemory.taskQueue) ? workspaceMemory.taskQueue : [];
+  updateProviderPill(currentProviderMode === 'gemini+ollama' ? 'gemini' : 'ollama');
+  sessionName.textContent = projectState.currentProjectDir.split('\\').pop();
+
+  modelSelect.innerHTML = `
+    <option value="auto">Auto</option>
+    <option value="gemini">Gemini</option>
+    <option value="ollama:llama3">Ollama Llama 3</option>
+    <option value="ollama:codellama">Ollama Code Llama</option>
+    <option value="ollama:mistral">Ollama Mistral</option>
+  `;
+  modelSelect.value = 'auto';
+
+  ensureEditor();
+  await loadFiles();
+  await syncProjectSummaryToMemory();
+  renderTaskQueue();
+  renderToolRail(await window.electronAPI.listToolPresets());
+  await refreshPreview();
+  addMessage('Workspace ready. Open or clone a project, then ask for implementation, debugging, git, Firebase, or full automation work.', 'ai', currentProviderMode === 'gemini+ollama' ? 'auto' : currentProviderMode);
 });

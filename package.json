@@ -1,8 +1,8 @@
 {
   "name": "newcodex",
-  "version": "1.0.0",
-  "description": "Electron Ollama AI App",
-  "author": "Your Name",
+  "version": "1.1.0",
+  "description": "Premium Codex-style Electron workspace with Gemini and Ollama fallback",
+  "author": "NewCodex",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -10,7 +10,7 @@
   },
   "build": {
     "appId": "com.newcodex.app",
-    "productName": "GeminiAIApp",
+    "productName": "NewCodex",
     "extraResources": [
       "./.env"
     ],
