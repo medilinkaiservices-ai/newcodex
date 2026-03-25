@@ -43,6 +43,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const newFolderButton = document.getElementById('new-folder-btn');
   const runQueueButton = document.getElementById('run-queue-btn');
   const taskQueueList = document.getElementById('task-queue-list');
+  const improvementList = document.getElementById('improvement-list');
+  const goalSummary = document.getElementById('goal-summary');
+  const businessProfileEl = document.getElementById('business-profile');
+  const opportunityMapEl = document.getElementById('opportunity-map');
+  const dailyGuideList = document.getElementById('daily-guide-list');
+  const dailyGuideButton = document.getElementById('daily-guide-btn');
+  const assessGoalsButton = document.getElementById('assess-goals-btn');
   const sessionName = document.querySelector('.session-name');
   const providerPill = document.getElementById('provider-pill');
   const editorContainer = document.getElementById('monaco-editor-container');
@@ -67,11 +74,64 @@ document.addEventListener('DOMContentLoaded', async () => {
     recentTasks: [],
     mistakesToAvoid: [],
     successfulPatterns: [],
-    knowledgeNotes: []
+    knowledgeNotes: [],
+    personalGoals: null,
+    dailyGuide: [],
+    businessProfile: null,
+    opportunityMap: []
   };
   let taskQueue = [];
   let queueRunning = false;
   let projectSummary = null;
+  let knowledgeCache = [];
+  let improvementProposals = [];
+  const MAX_PARALLEL_TASKS = 2;
+
+  function getDefaultPersonalGoals() {
+    return {
+      primaryMission: 'Use NewCodex as a life-line workspace to build web applications, apps, websites, custom AI tools, and business software for freelancing income, client delivery, and long-term product growth.',
+      incomeFocus: 'Earn through freelancing first, complete client work with NewCodex, then grow into custom business applications, automation services, and productized AI offerings.',
+      priorityServices: [
+        'business websites',
+        'web applications',
+        'custom AI assistants',
+        'automation tools',
+        'small business software'
+      ],
+      preferredMarkets: [
+        'freelancing clients',
+        'local businesses',
+        'startup founders',
+        'service businesses'
+      ],
+      guidanceStyle: 'Act like a personal guide: suggest practical earning ideas, remind the user about the next best moves, recommend the next build, and explain in simple Telugu and English.',
+      operatingRules: [
+        'Become more powerful through safe incremental improvements',
+        'Ask permission before app-level updates or risky changes',
+        'Never lose the ability to open projects, read files, edit files, run commands, and continue core coding work',
+        'Keep memory, goals, and business guidance persistent across sessions',
+        'Prefer reversible changes and fallback paths so the app does not die during improvement'
+      ]
+    };
+  }
+
+  function getDefaultBusinessProfile() {
+    return {
+      skillLevel: 'beginner-coder, strong with direction and AI-assisted execution',
+      strengths: [
+        'clear ambition',
+        'AI-assisted execution mindset',
+        'focus on freelancing income',
+        'interest in useful business apps',
+        'persistence'
+      ],
+      constraints: [
+        'limited coding depth right now',
+        'needs simple guidance',
+        'should start with high-value low-complexity client work'
+      ]
+    };
+  }
 
   const AGENT_SYSTEM_PROMPT = `You are NewCodex, a Codex-style autonomous engineering agent.
 Use tools deliberately and keep moving the task forward.
@@ -85,7 +145,18 @@ Available JSON tools:
 {"tool":"read_file","path":"src/app.js"}
 {"tool":"write_file","path":"src/app.js","content":"..."}
 {"tool":"run_command","command":"npm test"}
+{"tool":"search_knowledge","query":"electron ipc examples"}
+{"tool":"search_web","query":"latest Electron ipcMain docs"}
 {"tool":"read_web","url":"https://example.com/docs"}
+{"tool":"remember_note","title":"Electron IPC docs","content":"Short reusable summary","tags":["electron","docs"]}
+{"tool":"propose_improvement","title":"Add Playwright helper","summary":"This task would be easier with browser navigation helpers. Ask the user for approval before changing the app.","scope":"app"}
+{"tool":"browser_open","url":"https://example.com/docs"}
+{"tool":"browser_navigate","url":"https://example.com/reference"}
+{"tool":"browser_snapshot","message":"Inspect the currently open browser page"}
+{"tool":"browser_click","selector":"button[type='submit']"}
+{"tool":"browser_type","selector":"input[name='q']","text":"electron ipc"}
+{"tool":"browser_extract","selector":"main, article, pre"}
+{"tool":"capture_page","url":"https://example.com/docs","message":"Capture the page for visual inspection"}
 {"tool":"capture_screen","message":"Capture the current browser or app screen for visual debugging"}
 {"tool":"done","message":"Task complete"}
 `;
@@ -163,6 +234,22 @@ Available JSON tools:
     }
   }
 
+  function setSessionTitle(rawName) {
+    const fallback = 'Workspace';
+    const cleanName = (rawName || '').trim();
+    if (!cleanName || cleanName.toLowerCase() === 'generated') {
+      sessionName.textContent = fallback;
+      return;
+    }
+
+    const normalized = cleanName
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    sessionName.textContent = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+
   function addMessage(text, type, provider) {
     const message = document.createElement('div');
     message.className = `message ${type}`;
@@ -206,7 +293,7 @@ Available JSON tools:
 
       const title = document.createElement('div');
       title.className = 'task-title';
-      title.textContent = task.title;
+      title.textContent = task.worker ? `[${task.worker}] ${task.title}` : task.title;
       item.appendChild(title);
 
       const status = document.createElement('div');
@@ -230,12 +317,113 @@ Available JSON tools:
     });
   }
 
+  function renderImprovementProposals() {
+    if (!improvementList) {
+      return;
+    }
+
+    improvementList.innerHTML = '';
+    improvementProposals.forEach((proposal) => {
+      const card = document.createElement('div');
+      card.className = `improvement-card ${proposal.status || 'pending'}`;
+
+      const title = document.createElement('div');
+      title.className = 'improvement-title';
+      title.textContent = proposal.title;
+      card.appendChild(title);
+
+      const summary = document.createElement('div');
+      summary.className = 'improvement-summary';
+      summary.textContent = proposal.summary || '';
+      card.appendChild(summary);
+
+      const status = document.createElement('div');
+      status.className = 'improvement-status';
+      status.textContent = proposal.status || 'pending';
+      card.appendChild(status);
+
+      if ((proposal.status || 'pending') === 'pending') {
+        const actions = document.createElement('div');
+        actions.className = 'improvement-actions';
+
+        const approveButton = document.createElement('button');
+        approveButton.className = 'mini-action-btn';
+        approveButton.textContent = 'Approve';
+        approveButton.onclick = async () => {
+          improvementProposals = await window.electronAPI.respondImprovement(proposal.id, 'approved');
+          renderImprovementProposals();
+          addMessage(`Approved improvement: ${proposal.title}`, 'ai', 'system');
+        };
+        actions.appendChild(approveButton);
+
+        const dismissButton = document.createElement('button');
+        dismissButton.className = 'mini-action-btn';
+        dismissButton.textContent = 'Dismiss';
+        dismissButton.onclick = async () => {
+          improvementProposals = await window.electronAPI.respondImprovement(proposal.id, 'dismissed');
+          renderImprovementProposals();
+          addMessage(`Dismissed improvement: ${proposal.title}`, 'ai', 'system');
+        };
+        actions.appendChild(dismissButton);
+
+        card.appendChild(actions);
+      }
+
+      improvementList.appendChild(card);
+    });
+  }
+
+  function renderGoalGuide() {
+    if (goalSummary) {
+      const goals = workspaceMemory.personalGoals;
+      goalSummary.textContent = goals
+        ? `${goals.primaryMission.split('. ')[0]}. Income focus: ${goals.incomeFocus}`
+        : 'Set your mission so NewCodex can guide your daily work and earning path.';
+    }
+
+    if (dailyGuideList) {
+      dailyGuideList.innerHTML = '';
+      const guideItems = Array.isArray(workspaceMemory.dailyGuide) ? workspaceMemory.dailyGuide.slice(0, 3) : [];
+      guideItems.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'daily-guide-item';
+        item.textContent = entry;
+        dailyGuideList.appendChild(item);
+      });
+    }
+
+    if (businessProfileEl) {
+      const profile = workspaceMemory.businessProfile;
+      businessProfileEl.textContent = profile
+        ? `Profile: ${profile.skillLevel}. Strengths: ${(profile.strengths || []).slice(0, 3).join(', ')}.`
+        : '';
+    }
+
+    if (opportunityMapEl) {
+      opportunityMapEl.innerHTML = '';
+      const opportunityItems = Array.isArray(workspaceMemory.opportunityMap) ? workspaceMemory.opportunityMap.slice(0, 3) : [];
+      opportunityItems.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'daily-guide-item';
+        item.textContent = entry;
+        opportunityMapEl.appendChild(item);
+      });
+    }
+  }
+
   async function persistQueueState() {
     workspaceMemory = await window.electronAPI.updateMemory({
       summary: workspaceMemory.summary,
       preferences: workspaceMemory.preferences,
       recentTasks: workspaceMemory.recentTasks,
       mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      successfulPatterns: workspaceMemory.successfulPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      improvementProposals: improvementProposals,
+      personalGoals: workspaceMemory.personalGoals,
+      dailyGuide: workspaceMemory.dailyGuide,
+      businessProfile: workspaceMemory.businessProfile,
+      opportunityMap: workspaceMemory.opportunityMap,
       taskQueue
     });
   }
@@ -245,10 +433,124 @@ Available JSON tools:
       id: `${Date.now()}-${index}`,
       title: step,
       status: 'pending',
-      retries: 0
+      retries: 0,
+      worker: null
     }));
     await persistQueueState();
     renderTaskQueue();
+  }
+
+  function getTaskExecutionMode(task) {
+    const title = (task?.title || '').toLowerCase();
+    const parallelSignals = [
+      'research',
+      'inspect',
+      'analyze',
+      'review',
+      'read docs',
+      'read documentation',
+      'search',
+      'plan',
+      'summarize',
+      'explore'
+    ];
+    const sequentialSignals = [
+      'implement',
+      'edit',
+      'write',
+      'create',
+      'delete',
+      'rename',
+      'refactor',
+      'run',
+      'test',
+      'build',
+      'deploy',
+      'push',
+      'commit',
+      'migrate',
+      'fix'
+    ];
+
+    if (sequentialSignals.some((signal) => title.includes(signal))) {
+      return 'sequential';
+    }
+    if (parallelSignals.some((signal) => title.includes(signal))) {
+      return 'parallel';
+    }
+    return 'sequential';
+  }
+
+  function getNextRunnableTasks(limit) {
+    const pendingTasks = taskQueue.filter((task) => task.status === 'pending');
+    if (!pendingTasks.length) {
+      return [];
+    }
+
+    const firstSequential = pendingTasks.find((task) => getTaskExecutionMode(task) === 'sequential');
+    if (firstSequential) {
+      return [firstSequential];
+    }
+
+    return pendingTasks.slice(0, limit);
+  }
+
+  async function persistExecutionLearning({ successTask, failedTask, failureReason, verificationCommand }) {
+    const nextMistakes = failedTask
+      ? Array.from(new Set([
+        ...(workspaceMemory.mistakesToAvoid || []),
+        `Failure pattern: ${failedTask.title}${failureReason ? ` -> ${failureReason}` : ''}`.slice(0, 280)
+      ])).slice(-20)
+      : workspaceMemory.mistakesToAvoid;
+
+    const nextSuccessPatterns = successTask
+      ? Array.from(new Set([
+        ...(workspaceMemory.successfulPatterns || []),
+        `Successful task flow: ${successTask.title}${verificationCommand ? ` -> verified with ${verificationCommand}` : ''}`.slice(0, 280)
+      ])).slice(-30)
+      : workspaceMemory.successfulPatterns;
+
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary,
+      preferences: workspaceMemory.preferences,
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: nextMistakes,
+      successfulPatterns: nextSuccessPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      improvementProposals,
+      personalGoals: workspaceMemory.personalGoals,
+      dailyGuide: workspaceMemory.dailyGuide,
+      businessProfile: workspaceMemory.businessProfile,
+      opportunityMap: workspaceMemory.opportunityMap,
+      taskQueue
+    });
+  }
+
+  async function createRecoveryTask(task, reason) {
+    const recoveryTask = {
+      id: `${Date.now()}-recovery-${Math.random().toString(36).slice(2, 7)}`,
+      title: `Recover from failure in "${task.title}": inspect cause, patch the issue, then re-run verification`,
+      status: 'pending',
+      retries: 0,
+      worker: null,
+      recoveryFor: task.id,
+      failureReason: (reason || 'Unknown error').slice(0, 500)
+    };
+
+    const existingRecovery = taskQueue.find((entry) => entry.recoveryFor === task.id && entry.status !== 'completed');
+    if (existingRecovery) {
+      return existingRecovery;
+    }
+
+    const taskIndex = taskQueue.findIndex((entry) => entry.id === task.id);
+    if (taskIndex >= 0) {
+      taskQueue.splice(taskIndex + 1, 0, recoveryTask);
+    } else {
+      taskQueue.push(recoveryTask);
+    }
+    await persistQueueState();
+    renderTaskQueue();
+    return recoveryTask;
   }
 
   function parseFiles(aiText) {
@@ -286,27 +588,38 @@ Available JSON tools:
         'Split large tasks into smaller milestones',
         'Self-heal after failed attempts and continue',
         'Support Telugu and English naturally',
-        'Ask permission before app-level self-improvement or updates'
+        'Ask permission before app-level self-improvement or updates',
+        'Guide the user toward freelancing income and product-building',
+        'Improve power safely without breaking the core app'
       ])).slice(0, 12),
       recentTasks: nextRecentTasks,
       mistakesToAvoid: Array.from(new Set([
         ...(workspaceMemory.mistakesToAvoid || []),
         'Do not say you cannot read files when project tools are available',
         'Do not auto-refuse large tasks; break them down first',
-        'Do not stop after one failed approach if another reasonable path exists'
+        'Do not stop after one failed approach if another reasonable path exists',
+        'Do not break core app flows while trying to self-improve',
+        'Do not remove fallback behavior before a replacement is proven stable'
       ])).slice(-12),
       successfulPatterns: Array.from(new Set([
         ...(workspaceMemory.successfulPatterns || []),
         'Use planner -> queue -> execute -> verify flow for large tasks',
         'Use Gemini first and Ollama fallback when needed',
-        'Keep offline memory so project help continues without internet'
+        'Keep offline memory so project help continues without internet',
+        'Use safe incremental upgrades and preserve rollback-friendly behavior'
       ])).slice(-20),
       knowledgeNotes: Array.from(new Set([
         ...(workspaceMemory.knowledgeNotes || []),
         'User prefers Codex-like autonomous coding behavior.',
         'User wants bilingual Telugu/English chat.',
-        'Self-improvement suggestions need explicit approval before changing app behavior.'
-      ])).slice(-25)
+        'Self-improvement suggestions need explicit approval before changing app behavior.',
+        'User wants NewCodex to act like a personal guide for earning money through freelancing and building applications.',
+        'NewCodex should become more powerful without dying during updates or losing core capabilities.'
+      ])).slice(-25),
+      personalGoals: workspaceMemory.personalGoals || getDefaultPersonalGoals(),
+      dailyGuide: workspaceMemory.dailyGuide || [],
+      businessProfile: workspaceMemory.businessProfile || getDefaultBusinessProfile(),
+      opportunityMap: workspaceMemory.opportunityMap || []
     });
   }
 
@@ -319,8 +632,144 @@ Available JSON tools:
       mistakesToAvoid: workspaceMemory.mistakesToAvoid,
       successfulPatterns: workspaceMemory.successfulPatterns,
       knowledgeNotes: workspaceMemory.knowledgeNotes,
+      personalGoals: workspaceMemory.personalGoals,
+      dailyGuide: workspaceMemory.dailyGuide,
+      businessProfile: workspaceMemory.businessProfile,
+      opportunityMap: workspaceMemory.opportunityMap,
       taskQueue
     });
+  }
+
+  async function loadKnowledgeState() {
+    const result = await window.electronAPI.getKnowledgeState();
+    knowledgeCache = Array.isArray(result?.items) ? result.items : [];
+  }
+
+  async function loadImprovementProposals() {
+    improvementProposals = await window.electronAPI.getImprovements();
+    renderImprovementProposals();
+  }
+
+  async function ensurePersonalGoals() {
+    if (workspaceMemory.personalGoals) {
+      renderGoalGuide();
+      return;
+    }
+
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary,
+      preferences: workspaceMemory.preferences,
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      successfulPatterns: workspaceMemory.successfulPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      improvementProposals,
+      taskQueue,
+      personalGoals: getDefaultPersonalGoals(),
+      dailyGuide: workspaceMemory.dailyGuide || [],
+      businessProfile: workspaceMemory.businessProfile || getDefaultBusinessProfile(),
+      opportunityMap: workspaceMemory.opportunityMap || []
+    });
+    renderGoalGuide();
+  }
+
+  async function generateDailyGuide() {
+    const goals = workspaceMemory.personalGoals || getDefaultPersonalGoals();
+    const guidePrompt = [
+      'You are NewCodex, a personal business and execution guide.',
+      'Create exactly 5 short daily guidance points for the user.',
+      'Focus on freelancing income, building useful applications, simple next actions, and product opportunities.',
+      'Keep the advice practical for a non-coder who depends on NewCodex.',
+      'Write in simple Telugu-English mixed style.',
+      `Primary mission: ${goals.primaryMission}`,
+      `Income focus: ${goals.incomeFocus}`,
+      `Priority services: ${(goals.priorityServices || []).join(', ')}`,
+      `Preferred markets: ${(goals.preferredMarkets || []).join(', ')}`
+    ].join('\n');
+
+    const result = extractResponse(await window.electronAPI.sendPrompt(guidePrompt, modelSelect.value, getCurrentContext()));
+    const lines = result.text
+      .split('\n')
+      .map((line) => line.replace(/^\s*[-*0-9.]+\s*/, '').trim())
+      .filter(Boolean)
+      .slice(0, 5);
+
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary,
+      preferences: Array.from(new Set([
+        ...(workspaceMemory.preferences || []),
+        'Guide the user toward freelancing income and product-building'
+      ])).slice(0, 20),
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      successfulPatterns: workspaceMemory.successfulPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      improvementProposals,
+      taskQueue,
+      personalGoals: goals,
+      dailyGuide: lines,
+      businessProfile: workspaceMemory.businessProfile || getDefaultBusinessProfile(),
+      opportunityMap: workspaceMemory.opportunityMap || []
+    });
+    renderGoalGuide();
+    addMessage(`Daily guide refreshed for your goals.\n\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`, 'ai', result.provider);
+  }
+
+  async function assessStrengthsAndOpportunities() {
+    const goals = workspaceMemory.personalGoals || getDefaultPersonalGoals();
+    const profile = workspaceMemory.businessProfile || getDefaultBusinessProfile();
+    const assessPrompt = [
+      'You are a practical freelance business strategist and AI product guide.',
+      'Return exactly 6 short opportunity lines.',
+      'Each line must say what to sell, to whom, and why it fits the user now.',
+      'Focus on realistic services and product ideas that can be built with AI assistance.',
+      'Write in simple Telugu-English mixed style.',
+      `Mission: ${goals.primaryMission}`,
+      `Income focus: ${goals.incomeFocus}`,
+      `Skill level: ${profile.skillLevel}`,
+      `Strengths: ${(profile.strengths || []).join(', ')}`,
+      `Constraints: ${(profile.constraints || []).join(', ')}`
+    ].join('\n');
+
+    const result = extractResponse(await window.electronAPI.sendPrompt(assessPrompt, modelSelect.value, getCurrentContext()));
+    const lines = result.text
+      .split('\n')
+      .map((line) => line.replace(/^\s*[-*0-9.]+\s*/, '').trim())
+      .filter(Boolean)
+      .slice(0, 6);
+
+    workspaceMemory = await window.electronAPI.updateMemory({
+      summary: workspaceMemory.summary,
+      preferences: workspaceMemory.preferences,
+      recentTasks: workspaceMemory.recentTasks,
+      mistakesToAvoid: workspaceMemory.mistakesToAvoid,
+      successfulPatterns: workspaceMemory.successfulPatterns,
+      knowledgeNotes: workspaceMemory.knowledgeNotes,
+      improvementProposals,
+      taskQueue,
+      personalGoals: goals,
+      dailyGuide: workspaceMemory.dailyGuide,
+      businessProfile: profile,
+      opportunityMap: lines
+    });
+    renderGoalGuide();
+    addMessage(`Opportunity map refreshed.\n\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`, 'ai', result.provider);
+  }
+
+  async function rememberKnowledge({ title, content, url = '', source = 'research', tags = [] }) {
+    const saved = await window.electronAPI.saveKnowledge({
+      title,
+      content,
+      url,
+      source,
+      tags
+    });
+    knowledgeCache = [saved, ...knowledgeCache.filter((item) => item.id !== saved.id)].slice(0, 20);
+    return saved;
+  }
+
+  function summarizeForKnowledge(text, limit = 1000) {
+    return (text || '').replace(/\s+/g, ' ').trim().slice(0, limit);
   }
 
   function renderAttachments() {
@@ -352,6 +801,18 @@ Available JSON tools:
 
       attachmentTray.appendChild(chip);
     });
+  }
+
+  async function attachImageData(dataUrl, mimeType = 'image/png', name = 'capture.png') {
+    const image = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name,
+      mimeType,
+      dataUrl
+    };
+    attachedImages = [...attachedImages, image];
+    renderAttachments();
+    return image;
   }
 
   function fileToAttachment(file) {
@@ -394,9 +855,28 @@ Available JSON tools:
 
   async function attachScreenCapture() {
     const image = await captureScreenAttachment();
-    attachedImages = [...attachedImages, image];
-    renderAttachments();
-    return image;
+    return attachImageData(image.dataUrl, image.mimeType, image.name);
+  }
+
+  async function attachWebCapture(url) {
+    const result = await window.electronAPI.captureWebPage(url);
+    if (!result?.ok || !result.dataUrl) {
+      throw new Error(result?.error || 'Web page capture failed.');
+    }
+    await attachImageData(result.dataUrl, result.mimeType || 'image/png', 'web-capture.png');
+    return result;
+  }
+
+  async function attachBrowserSnapshot(snapshotResult) {
+    if (!snapshotResult?.ok || !snapshotResult.dataUrl) {
+      throw new Error(snapshotResult?.error || 'Browser snapshot failed.');
+    }
+
+    await attachImageData(
+      snapshotResult.dataUrl,
+      snapshotResult.mimeType || 'image/png',
+      'browser-snapshot.png'
+    );
   }
 
   async function handleImagePaste(event) {
@@ -609,10 +1089,116 @@ Available JSON tools:
         addMessage(toolOutput, 'ai', 'tool');
       } else if (action.tool === 'run_command') {
         toolOutput = await runTerminalCommand(action.command);
+      } else if (action.tool === 'search_knowledge') {
+        const knowledgeResults = await window.electronAPI.searchKnowledge(action.query);
+        toolOutput = JSON.stringify(knowledgeResults, null, 2);
+        addMessage(`Searched saved knowledge: \`${action.query}\``, 'ai', 'tool');
+      } else if (action.tool === 'search_web') {
+        const searchResult = await window.electronAPI.searchWeb(action.query);
+        toolOutput = searchResult.ok
+          ? JSON.stringify(searchResult.results, null, 2)
+          : `Web search failed: ${searchResult.error || 'unknown error'}`;
+        if (searchResult.ok && searchResult.results?.length) {
+          await rememberKnowledge({
+            title: `Search: ${action.query}`,
+            content: searchResult.results.map((item) => `${item.title} - ${item.url}`).join('\n'),
+            source: 'search',
+            tags: ['search', 'web', ...action.query.toLowerCase().split(/\s+/).slice(0, 4)]
+          });
+        }
+        addMessage(`Searched web: \`${action.query}\``, 'ai', 'tool');
       } else if (action.tool === 'read_web') {
         const webResult = await window.electronAPI.readWebPage(action.url);
         toolOutput = webResult.ok ? webResult.content : `Web read failed: ${webResult.content}`;
+        if (webResult.ok) {
+          await rememberKnowledge({
+            title: action.url,
+            content: summarizeForKnowledge(webResult.content, 3000),
+            url: action.url,
+            source: 'web',
+            tags: ['web', 'docs']
+          });
+        }
         addMessage(`Read web page: \`${action.url}\``, 'ai', 'tool');
+      } else if (action.tool === 'remember_note') {
+        const saved = await rememberKnowledge({
+          title: action.title || 'Agent note',
+          content: action.content || '',
+          source: 'agent',
+          tags: Array.isArray(action.tags) ? action.tags : []
+        });
+        toolOutput = `Saved note: ${saved.title}`;
+        addMessage(`Saved knowledge note: \`${saved.title}\``, 'ai', 'tool');
+      } else if (action.tool === 'propose_improvement') {
+        const proposal = await window.electronAPI.proposeImprovement({
+          title: action.title || 'Suggested improvement',
+          summary: action.summary || '',
+          scope: action.scope || 'app'
+        });
+        improvementProposals = [proposal, ...improvementProposals.filter((item) => item.id !== proposal.id)];
+        renderImprovementProposals();
+        toolOutput = `Created approval request: ${proposal.title}`;
+        addMessage(`Proposed app improvement: \`${proposal.title}\``, 'ai', 'tool');
+      } else if (action.tool === 'browser_open') {
+        const snapshot = await window.electronAPI.browserOpen(action.url);
+        toolOutput = snapshot.ok ? `${snapshot.title}\n${snapshot.url}\n${snapshot.content}` : `Browser open failed: ${snapshot.error || 'unknown error'}`;
+        if (snapshot.ok) {
+          await attachBrowserSnapshot(snapshot);
+          await rememberKnowledge({
+            title: snapshot.title || action.url,
+            content: summarizeForKnowledge(snapshot.content, 3000),
+            url: snapshot.url || action.url,
+            source: 'browser',
+            tags: ['browser', 'web']
+          });
+        }
+        addMessage(`Opened browser page: \`${action.url}\``, 'ai', 'tool');
+      } else if (action.tool === 'browser_navigate') {
+        const snapshot = await window.electronAPI.browserNavigate(action.url);
+        toolOutput = snapshot.ok ? `${snapshot.title}\n${snapshot.url}\n${snapshot.content}` : `Browser navigate failed: ${snapshot.error || 'unknown error'}`;
+        if (snapshot.ok) {
+          await attachBrowserSnapshot(snapshot);
+        }
+        addMessage(`Navigated browser to: \`${action.url}\``, 'ai', 'tool');
+      } else if (action.tool === 'browser_snapshot') {
+        const snapshot = await window.electronAPI.browserSnapshot();
+        toolOutput = snapshot.ok ? `${snapshot.title}\n${snapshot.url}\n${snapshot.content}` : `Browser snapshot failed: ${snapshot.error || 'unknown error'}`;
+        if (snapshot.ok) {
+          await attachBrowserSnapshot(snapshot);
+        }
+        addMessage(action.message || 'Captured current browser page state.', 'ai', 'tool');
+      } else if (action.tool === 'browser_click') {
+        const snapshot = await window.electronAPI.browserClick(action.selector);
+        toolOutput = snapshot.ok ? `${snapshot.title}\n${snapshot.url}\n${snapshot.content}` : `Browser click failed: ${snapshot.error || 'unknown error'}`;
+        if (snapshot.ok) {
+          await attachBrowserSnapshot(snapshot);
+        }
+        addMessage(`Clicked selector: \`${action.selector}\``, 'ai', 'tool');
+      } else if (action.tool === 'browser_type') {
+        const snapshot = await window.electronAPI.browserType(action.selector, action.text || '');
+        toolOutput = snapshot.ok ? `${snapshot.title}\n${snapshot.url}\n${snapshot.content}` : `Browser type failed: ${snapshot.error || 'unknown error'}`;
+        if (snapshot.ok) {
+          await attachBrowserSnapshot(snapshot);
+        }
+        addMessage(`Typed into selector: \`${action.selector}\``, 'ai', 'tool');
+      } else if (action.tool === 'browser_extract') {
+        const extraction = await window.electronAPI.browserExtract(action.selector);
+        toolOutput = extraction.ok ? JSON.stringify(extraction.items, null, 2) : `Browser extract failed: ${extraction.error || 'unknown error'}`;
+        if (extraction.ok) {
+          await rememberKnowledge({
+            title: `Extract: ${action.selector}`,
+            content: extraction.items.map((item) => item.text).join('\n\n'),
+            source: 'browser',
+            tags: ['browser', 'extract']
+          });
+        }
+        addMessage(`Extracted page content with selector: \`${action.selector}\``, 'ai', 'tool');
+      } else if (action.tool === 'capture_page') {
+        const captureResult = await attachWebCapture(action.url);
+        toolOutput = captureResult.ok
+          ? `Captured page ${action.url} and attached it to context.`
+          : `Page capture failed: ${captureResult.error || 'unknown error'}`;
+        addMessage(action.message || `Captured page: \`${action.url}\``, 'ai', 'tool');
       } else if (action.tool === 'capture_screen') {
         await attachScreenCapture();
         toolOutput = 'Captured the current screen and attached it to context.';
@@ -631,9 +1217,10 @@ Available JSON tools:
 
   async function executeSingleTask(task) {
     task.status = 'in_progress';
+    task.worker = task.worker || `Worker ${Math.floor(Math.random() * MAX_PARALLEL_TASKS) + 1}`;
     await persistQueueState();
     renderTaskQueue();
-    addMessage(`Executing task: ${task.title}`, 'ai', 'tool');
+    addMessage(`Executing task (${task.worker}): ${task.title}`, 'ai', 'tool');
     try {
       await runAgentLoop([task.title]);
       if (projectSummary?.verificationCommands?.length) {
@@ -642,20 +1229,47 @@ Available JSON tools:
         const verifyOutput = await runTerminalCommand(verifyCommand);
         if (/error|failed|exception/i.test(verifyOutput)) {
           task.status = 'failed';
+          task.worker = null;
+          await persistExecutionLearning({
+            failedTask: task,
+            failureReason: `Verification failed using ${verifyCommand}`
+          });
+          await createRecoveryTask(task, `Verification failed using ${verifyCommand}`);
           addMessage(`Verification reported issues for: ${task.title}`, 'ai', 'system');
           await persistQueueState();
           renderTaskQueue();
           return;
         }
+        await persistExecutionLearning({
+          successTask: task,
+          verificationCommand: verifyCommand
+        });
+      } else {
+        await persistExecutionLearning({
+          successTask: task
+        });
       }
       task.status = 'completed';
     } catch (error) {
       task.retries = (task.retries || 0) + 1;
       if (task.retries <= 2) {
         task.status = 'pending';
+        task.worker = null;
+        await persistExecutionLearning({
+          failedTask: task,
+          failureReason: error.message
+        });
+        if (task.retries === 1) {
+          await createRecoveryTask(task, error.message);
+        }
         addMessage(`Task failed, retrying (${task.retries}/2): ${task.title}`, 'ai', 'system');
       } else {
         task.status = 'failed';
+        task.worker = null;
+        await persistExecutionLearning({
+          failedTask: task,
+          failureReason: error.message
+        });
         addMessage(`Task failed: ${task.title}\n\n${error.message}`, 'ai', 'system');
       }
     }
@@ -670,16 +1284,26 @@ Available JSON tools:
 
     queueRunning = true;
     try {
-      for (const task of taskQueue) {
-        if (task.status === 'completed') {
-          continue;
+      while (taskQueue.some((task) => task.status === 'pending')) {
+        const runnableTasks = getNextRunnableTasks(MAX_PARALLEL_TASKS);
+        if (!runnableTasks.length) {
+          break;
         }
-        await executeSingleTask(task);
-        if (task.status === 'pending') {
-          await executeSingleTask(task);
-        }
-        if (task.status === 'pending') {
-          await executeSingleTask(task);
+
+        await Promise.all(runnableTasks.map((task, index) => {
+          task.worker = `Worker ${index + 1}`;
+          return executeSingleTask(task);
+        }));
+
+        for (const task of runnableTasks) {
+          if (task.status === 'pending') {
+            task.worker = 'Worker 1';
+            await executeSingleTask(task);
+          }
+          if (task.status === 'pending') {
+            task.worker = 'Worker 1';
+            await executeSingleTask(task);
+          }
         }
       }
     } finally {
@@ -717,7 +1341,7 @@ Available JSON tools:
     if (!selected) {
       return;
     }
-    sessionName.textContent = selected.split('\\').pop();
+    setSessionTitle(selected.split('\\').pop());
     addMessage(`Project folder switched to **${selected}**`, 'ai', 'system');
     await loadFiles();
     await refreshPreview();
@@ -733,7 +1357,7 @@ Available JSON tools:
     const result = await window.electronAPI.cloneRepository(repoUrl);
     addMessage(result.message || (result.ok ? 'Repository cloned.' : 'Clone failed.'), 'ai', result.ok ? 'tool' : 'system');
     if (result.ok && result.path) {
-      sessionName.textContent = result.path.split('\\').pop();
+      setSessionTitle(result.path.split('\\').pop());
       await loadFiles();
       await refreshPreview();
       await syncProjectSummaryToMemory();
@@ -841,6 +1465,23 @@ Available JSON tools:
       addMessage('Screen capture added to the composer.', 'ai', 'tool');
     };
     toolRail.appendChild(screenButton);
+
+    const pageButton = document.createElement('button');
+    pageButton.className = 'tool-chip';
+    pageButton.textContent = 'Capture Page';
+    pageButton.onclick = async () => {
+      const url = window.prompt('Enter a page URL to capture');
+      if (!url) {
+        return;
+      }
+      try {
+        await attachWebCapture(url);
+        addMessage(`Captured page and added it to the composer: \`${url}\``, 'ai', 'tool');
+      } catch (error) {
+        addMessage(`Page capture failed: ${error.message}`, 'ai', 'system');
+      }
+    };
+    toolRail.appendChild(pageButton);
   }
 
   sendButton.onclick = sendMessage;
@@ -855,6 +1496,8 @@ Available JSON tools:
   newFileButton?.addEventListener('click', createNewFile);
   newFolderButton?.addEventListener('click', createNewFolder);
   runQueueButton?.addEventListener('click', executeTaskQueue);
+  assessGoalsButton?.addEventListener('click', assessStrengthsAndOpportunities);
+  dailyGuideButton?.addEventListener('click', generateDailyGuide);
 
   fileSearch.addEventListener('input', filterFiles);
   input.addEventListener('keydown', (event) => {
@@ -929,10 +1572,13 @@ Available JSON tools:
   const projectState = await window.electronAPI.getProjectState();
   currentProviderMode = projectState.providerMode;
   workspaceMemory = projectState.memory || workspaceMemory;
+  workspaceMemory.businessProfile = workspaceMemory.businessProfile || getDefaultBusinessProfile();
+  workspaceMemory.opportunityMap = workspaceMemory.opportunityMap || [];
   projectSummary = projectState.projectSummary || null;
   taskQueue = Array.isArray(workspaceMemory.taskQueue) ? workspaceMemory.taskQueue : [];
+  improvementProposals = Array.isArray(workspaceMemory.improvementProposals) ? workspaceMemory.improvementProposals : [];
   updateProviderPill(currentProviderMode === 'gemini+ollama' ? 'gemini' : 'ollama');
-  sessionName.textContent = projectState.currentProjectDir.split('\\').pop();
+  setSessionTitle(projectState.currentProjectDir.split('\\').pop());
 
   modelSelect.innerHTML = `
     <option value="auto">Auto</option>
@@ -944,10 +1590,18 @@ Available JSON tools:
   modelSelect.value = 'auto';
 
   ensureEditor();
+  await ensurePersonalGoals();
   await loadFiles();
+  await loadKnowledgeState();
+  await loadImprovementProposals();
   await syncProjectSummaryToMemory();
   renderTaskQueue();
+  renderImprovementProposals();
+  renderGoalGuide();
   renderToolRail(await window.electronAPI.listToolPresets());
   await refreshPreview();
-  addMessage('Workspace ready. Open or clone a project, then ask for implementation, debugging, git, Firebase, or full automation work.', 'ai', currentProviderMode === 'gemini+ollama' ? 'auto' : currentProviderMode);
+  if (!Array.isArray(workspaceMemory.dailyGuide) || workspaceMemory.dailyGuide.length === 0) {
+    await generateDailyGuide();
+  }
+  addMessage('Workspace ready. NewCodex now remembers your mission: use freelancing and product builds to earn, grow, and ship useful applications together.', 'ai', currentProviderMode === 'gemini+ollama' ? 'auto' : currentProviderMode);
 });

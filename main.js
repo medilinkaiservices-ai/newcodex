@@ -42,6 +42,10 @@ Core behavior:
 - support both Telugu and English naturally based on the user's language
 - keep useful offline memory so the system can continue helping even without internet access
 - you may suggest new tools or workflow improvements, but any app-level self-improvement that changes behavior or updates the app must be proposed first and requires user approval
+- treat long-term user success as a product goal: help the user earn through freelancing, build useful applications, and move toward independent execution
+- when proposing self-improvement, prefer safe, reversible, incremental changes over risky rewrites
+- never break the app during self-improvement: preserve a stable path, avoid deleting core flows, and keep fallback behavior available
+- preserve update survivability: configuration and memory should remain portable, core flows should degrade gracefully, and critical capabilities should still work offline when possible
 
 When the user asks for implementation work:
 - inspect existing project context first
@@ -80,10 +84,16 @@ Output ONLY a single valid JSON object in this format:
 
 let currentProjectDir = DEFAULT_PROJECT_DIR;
 let abortController = null;
+let hiddenBrowserSession = null;
 
 function getMemoryFilePath() {
   ensureProjectDir();
   return path.join(currentProjectDir, '.newcodex-memory.json');
+}
+
+function getKnowledgeFilePath() {
+  ensureProjectDir();
+  return path.join(currentProjectDir, '.newcodex-knowledge.json');
 }
 
 function readMemory() {
@@ -97,7 +107,12 @@ function readMemory() {
         mistakesToAvoid: [],
         taskQueue: [],
         successfulPatterns: [],
-        knowledgeNotes: []
+        knowledgeNotes: [],
+        improvementProposals: [],
+        personalGoals: null,
+        dailyGuide: [],
+        businessProfile: null,
+        opportunityMap: []
       };
     }
     return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -109,13 +124,103 @@ function readMemory() {
       mistakesToAvoid: [],
       taskQueue: [],
       successfulPatterns: [],
-      knowledgeNotes: []
+      knowledgeNotes: [],
+      improvementProposals: [],
+      personalGoals: null,
+      dailyGuide: [],
+      businessProfile: null,
+      opportunityMap: []
     };
   }
 }
 
 function writeMemory(memory) {
   fs.writeFileSync(getMemoryFilePath(), JSON.stringify(memory, null, 2), 'utf-8');
+}
+
+function readKnowledgeStore() {
+  try {
+    const filePath = getKnowledgeFilePath();
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function writeKnowledgeStore(items) {
+  fs.writeFileSync(getKnowledgeFilePath(), JSON.stringify(items, null, 2), 'utf-8');
+}
+
+function summarizeKnowledgeText(text = '') {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '';
+  }
+
+  const sentences = compact.match(/[^.!?]+[.!?]?/g) || [compact];
+  return sentences.slice(0, 3).join(' ').slice(0, 700).trim();
+}
+
+function saveKnowledgeItem(item = {}) {
+  const store = readKnowledgeStore();
+  const nextItem = {
+    id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: (item.title || 'Untitled note').slice(0, 160),
+    source: item.source || 'manual',
+    url: item.url || '',
+    tags: Array.isArray(item.tags) ? item.tags.slice(0, 12) : [],
+    summary: summarizeKnowledgeText(item.summary || item.content || ''),
+    content: (item.content || '').slice(0, 20000),
+    createdAt: item.createdAt || new Date().toISOString()
+  };
+
+  const duplicateIndex = store.findIndex((entry) => {
+    if (nextItem.url && entry.url) {
+      return entry.url === nextItem.url;
+    }
+    return entry.title === nextItem.title && entry.source === nextItem.source;
+  });
+
+  if (duplicateIndex >= 0) {
+    store[duplicateIndex] = {
+      ...store[duplicateIndex],
+      ...nextItem
+    };
+  } else {
+    store.unshift(nextItem);
+  }
+
+  writeKnowledgeStore(store.slice(0, 120));
+  return nextItem;
+}
+
+function searchKnowledge(query = '') {
+  const needle = query.toLowerCase().trim();
+  const store = readKnowledgeStore();
+
+  if (!needle) {
+    return store.slice(0, 12);
+  }
+
+  return store
+    .map((item) => {
+      const haystack = `${item.title} ${item.summary} ${item.content} ${(item.tags || []).join(' ')}`.toLowerCase();
+      const score = haystack.includes(needle) ? 2 : needle.split(/\s+/).reduce((total, part) => {
+        if (!part) {
+          return total;
+        }
+        return total + (haystack.includes(part) ? 1 : 0);
+      }, 0);
+      return { item, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 12)
+    .map((entry) => entry.item);
 }
 
 function ensureProjectDir() {
@@ -246,6 +351,219 @@ async function readWebPage(url) {
   return text.slice(0, 12000);
 }
 
+async function searchWeb(query) {
+  const targetUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const response = await fetch(targetUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'NewCodex/1.0'
+    },
+    signal: abortController?.signal
+  });
+
+  if (!response.ok) {
+    throw new Error(`Search request failed (${response.status})`);
+  }
+
+  const html = await response.text();
+  const results = [];
+  const resultPattern = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+
+  while ((match = resultPattern.exec(html)) !== null && results.length < 5) {
+    const rawUrl = match[1];
+    const title = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const redirectMatch = rawUrl.match(/[?&]uddg=([^&]+)/i);
+    const decodedUrl = redirectMatch ? decodeURIComponent(redirectMatch[1]) : rawUrl;
+    results.push({
+      title,
+      url: decodedUrl
+    });
+  }
+
+  return results;
+}
+
+async function captureWebPage(url) {
+  const pageWindow = new BrowserWindow({
+    show: false,
+    width: 1440,
+    height: 960,
+    webPreferences: {
+      sandbox: false,
+      contextIsolation: true
+    }
+  });
+
+  try {
+    await pageWindow.loadURL(url, {
+      userAgent: 'NewCodex/1.0'
+    });
+
+    await new Promise((resolve) => {
+      const finish = () => setTimeout(resolve, 1200);
+      if (pageWindow.webContents.isLoading()) {
+        pageWindow.webContents.once('did-finish-load', finish);
+        pageWindow.webContents.once('did-fail-load', finish);
+      } else {
+        finish();
+      }
+    });
+
+    const image = await pageWindow.webContents.capturePage();
+    return {
+      ok: true,
+      url,
+      mimeType: 'image/png',
+      dataUrl: image.toDataURL()
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url,
+      error: error.message
+    };
+  } finally {
+    if (!pageWindow.isDestroyed()) {
+      pageWindow.destroy();
+    }
+  }
+}
+
+function ensureHiddenBrowserSession() {
+  if (hiddenBrowserSession && !hiddenBrowserSession.isDestroyed()) {
+    return hiddenBrowserSession;
+  }
+
+  hiddenBrowserSession = new BrowserWindow({
+    show: false,
+    width: 1440,
+    height: 960,
+    webPreferences: {
+      sandbox: false,
+      contextIsolation: true
+    }
+  });
+
+  hiddenBrowserSession.on('closed', () => {
+    hiddenBrowserSession = null;
+  });
+
+  return hiddenBrowserSession;
+}
+
+async function waitForBrowserLoad(browserWindow) {
+  await new Promise((resolve) => {
+    const finish = () => setTimeout(resolve, 1200);
+    if (browserWindow.webContents.isLoading()) {
+      browserWindow.webContents.once('did-finish-load', finish);
+      browserWindow.webContents.once('did-fail-load', finish);
+    } else {
+      finish();
+    }
+  });
+}
+
+async function browserOpen(url) {
+  const browserWindow = ensureHiddenBrowserSession();
+  await browserWindow.loadURL(url, {
+    userAgent: 'NewCodex/1.0'
+  });
+  await waitForBrowserLoad(browserWindow);
+  return browserSnapshot();
+}
+
+async function browserNavigate(url) {
+  const browserWindow = ensureHiddenBrowserSession();
+  await browserWindow.loadURL(url, {
+    userAgent: 'NewCodex/1.0'
+  });
+  await waitForBrowserLoad(browserWindow);
+  return browserSnapshot();
+}
+
+async function browserSnapshot() {
+  const browserWindow = ensureHiddenBrowserSession();
+  const [title, currentUrl, text, image] = await Promise.all([
+    browserWindow.webContents.getTitle(),
+    Promise.resolve(browserWindow.webContents.getURL()),
+    browserWindow.webContents.executeJavaScript(`
+      (() => {
+        const bodyText = document.body ? document.body.innerText || '' : '';
+        return bodyText.replace(/\\s+/g, ' ').trim().slice(0, 12000);
+      })();
+    `, true).catch(() => ''),
+    browserWindow.webContents.capturePage()
+  ]);
+
+  return {
+    ok: true,
+    title,
+    url: currentUrl,
+    content: text,
+    mimeType: 'image/png',
+    dataUrl: image.toDataURL()
+  };
+}
+
+async function browserClick(selector) {
+  const browserWindow = ensureHiddenBrowserSession();
+  const result = await browserWindow.webContents.executeJavaScript(`
+    (() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) {
+        return { ok: false, error: 'Selector not found' };
+      }
+      element.click();
+      return { ok: true };
+    })();
+  `, true);
+  await waitForBrowserLoad(browserWindow);
+  return result.ok ? browserSnapshot() : result;
+}
+
+async function browserType(selector, text) {
+  const browserWindow = ensureHiddenBrowserSession();
+  const result = await browserWindow.webContents.executeJavaScript(`
+    (() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) {
+        return { ok: false, error: 'Selector not found' };
+      }
+      const value = ${JSON.stringify(text || '')};
+      if ('value' in element) {
+        element.focus();
+        element.value = value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true };
+      }
+      return { ok: false, error: 'Element is not editable' };
+    })();
+  `, true);
+  return result.ok ? browserSnapshot() : result;
+}
+
+async function browserExtract(selector) {
+  const browserWindow = ensureHiddenBrowserSession();
+  const result = await browserWindow.webContents.executeJavaScript(`
+    (() => {
+      const elements = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).slice(0, 10);
+      if (!elements.length) {
+        return { ok: false, error: 'Selector not found' };
+      }
+      return {
+        ok: true,
+        items: elements.map((element) => ({
+          text: (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 800),
+          html: (element.outerHTML || '').slice(0, 1200)
+        }))
+      };
+    })();
+  `, true);
+  return result;
+}
+
 function buildContext(contextData = {}) {
   let context = `\n\n--- CURRENT PROJECT ---\n${currentProjectDir}`;
   const memory = readMemory();
@@ -272,6 +590,43 @@ function buildContext(contextData = {}) {
 
   if (memory.knowledgeNotes?.length) {
     context += `\n\n--- KNOWLEDGE NOTES ---\n${memory.knowledgeNotes.join('\n')}`;
+  }
+
+  if (memory.personalGoals) {
+    const goals = memory.personalGoals;
+    context += `\n\n--- PERSONAL GOALS ---\nPrimary mission: ${goals.primaryMission || ''}`;
+    if (goals.incomeFocus) {
+      context += `\nIncome focus: ${goals.incomeFocus}`;
+    }
+    if (Array.isArray(goals.priorityServices) && goals.priorityServices.length) {
+      context += `\nPriority services: ${goals.priorityServices.join(', ')}`;
+    }
+    if (Array.isArray(goals.preferredMarkets) && goals.preferredMarkets.length) {
+      context += `\nPreferred markets: ${goals.preferredMarkets.join(', ')}`;
+    }
+    if (goals.guidanceStyle) {
+      context += `\nGuidance style: ${goals.guidanceStyle}`;
+    }
+  }
+
+  if (memory.dailyGuide?.length) {
+    context += `\n\n--- DAILY GUIDE ---\n${memory.dailyGuide.join('\n')}`;
+  }
+
+  if (memory.businessProfile) {
+    const profile = memory.businessProfile;
+    context += `\n\n--- BUSINESS PROFILE ---\nSkill level: ${profile.skillLevel || ''}\nStrengths: ${(profile.strengths || []).join(', ')}\nConstraints: ${(profile.constraints || []).join(', ')}`;
+  }
+
+  if (memory.opportunityMap?.length) {
+    context += `\n\n--- OPPORTUNITY MAP ---\n${memory.opportunityMap.join('\n')}`;
+  }
+
+  const recentKnowledge = readKnowledgeStore().slice(0, 6);
+  if (recentKnowledge.length) {
+    context += `\n\n--- SAVED KNOWLEDGE ---\n${recentKnowledge
+      .map((item) => `${item.title}: ${item.summary}`)
+      .join('\n')}`;
   }
 
   if (contextData.fileTree && contextData.fileTree.length) {
@@ -581,11 +936,73 @@ app.whenReady().then(() => {
       mistakesToAvoid: Array.isArray(patch.mistakesToAvoid) ? patch.mistakesToAvoid.slice(-20) : current.mistakesToAvoid ?? [],
       taskQueue: Array.isArray(patch.taskQueue) ? patch.taskQueue.slice(-100) : current.taskQueue ?? [],
       successfulPatterns: Array.isArray(patch.successfulPatterns) ? patch.successfulPatterns.slice(-30) : current.successfulPatterns ?? [],
-      knowledgeNotes: Array.isArray(patch.knowledgeNotes) ? patch.knowledgeNotes.slice(-40) : current.knowledgeNotes ?? []
+      knowledgeNotes: Array.isArray(patch.knowledgeNotes) ? patch.knowledgeNotes.slice(-40) : current.knowledgeNotes ?? [],
+      improvementProposals: Array.isArray(patch.improvementProposals) ? patch.improvementProposals.slice(-50) : current.improvementProposals ?? [],
+      personalGoals: patch.personalGoals ?? current.personalGoals ?? null,
+      dailyGuide: Array.isArray(patch.dailyGuide) ? patch.dailyGuide.slice(-12) : current.dailyGuide ?? [],
+      businessProfile: patch.businessProfile ?? current.businessProfile ?? null,
+      opportunityMap: Array.isArray(patch.opportunityMap) ? patch.opportunityMap.slice(-12) : current.opportunityMap ?? []
     };
     writeMemory(next);
     return next;
   });
+
+  ipcMain.handle('propose-improvement', async (event, proposal) => {
+    const current = readMemory();
+    const nextProposal = {
+      id: proposal.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      title: (proposal.title || 'Suggested improvement').slice(0, 160),
+      summary: (proposal.summary || '').slice(0, 600),
+      scope: proposal.scope || 'app',
+      status: 'pending',
+      createdAt: proposal.createdAt || new Date().toISOString()
+    };
+    const proposals = [nextProposal, ...(current.improvementProposals || [])]
+      .slice(0, 50);
+    const next = {
+      ...current,
+      improvementProposals: proposals
+    };
+    writeMemory(next);
+    return nextProposal;
+  });
+
+  ipcMain.handle('respond-improvement', async (event, id, status) => {
+    const current = readMemory();
+    const proposals = (current.improvementProposals || []).map((proposal) => (
+      proposal.id === id
+        ? { ...proposal, status, respondedAt: new Date().toISOString() }
+        : proposal
+    ));
+    const next = {
+      ...current,
+      improvementProposals: proposals
+    };
+    writeMemory(next);
+    return proposals;
+  });
+
+  ipcMain.handle('get-improvements', async () => readMemory().improvementProposals || []);
+
+  ipcMain.handle('save-knowledge', async (event, item) => {
+    const saved = saveKnowledgeItem(item);
+    const memory = readMemory();
+    const knowledgeNotes = Array.from(new Set([
+      ...(memory.knowledgeNotes || []),
+      `${saved.title}: ${saved.summary}`.slice(0, 320)
+    ])).slice(-40);
+    writeMemory({
+      ...memory,
+      knowledgeNotes
+    });
+    return saved;
+  });
+
+  ipcMain.handle('search-knowledge', async (event, query) => searchKnowledge(query));
+
+  ipcMain.handle('get-knowledge-state', async () => ({
+    items: readKnowledgeStore().slice(0, 20)
+  }));
 
   ipcMain.handle('get-preview-url', async () => {
     ensureProjectDir();
@@ -699,6 +1116,93 @@ app.whenReady().then(() => {
         ok: false,
         url,
         content: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('search-web', async (event, query) => {
+    try {
+      return {
+        ok: true,
+        query,
+        results: await searchWeb(query)
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        query,
+        results: [],
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('capture-web-page', async (event, url) => captureWebPage(url));
+
+  ipcMain.handle('browser-open', async (event, url) => {
+    try {
+      return await browserOpen(url);
+    } catch (error) {
+      return {
+        ok: false,
+        url,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('browser-navigate', async (event, url) => {
+    try {
+      return await browserNavigate(url);
+    } catch (error) {
+      return {
+        ok: false,
+        url,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('browser-snapshot', async () => {
+    try {
+      return await browserSnapshot();
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('browser-click', async (event, selector) => {
+    try {
+      return await browserClick(selector);
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('browser-type', async (event, selector, text) => {
+    try {
+      return await browserType(selector, text);
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message
+      };
+    }
+  });
+
+  ipcMain.handle('browser-extract', async (event, selector) => {
+    try {
+      return await browserExtract(selector);
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message
       };
     }
   });

@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; connect-src 'self' https://generativelanguage.googleapis.com http://localhost:11434 https://duckduckgo.com https://html.duckduckgo.com; font-src 'self' data:; frame-src 'self' file: data:; object-src 'none'; base-uri 'self'; form-action 'self';">
   <title>NewCodex</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -16,25 +17,46 @@
         <button id="clone-repo-btn" class="sidebar-open-btn" aria-label="Clone repository">Clone</button>
       </div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-header">
+      <details class="sidebar-section sidebar-block" open>
+        <summary class="sidebar-header">
           <span>Files</span>
           <div class="sidebar-mini-actions">
             <button id="new-file-btn" class="mini-action-btn" aria-label="New file">+F</button>
             <button id="new-folder-btn" class="mini-action-btn" aria-label="New folder">+D</button>
           </div>
-        </div>
+        </summary>
         <input id="file-search" type="text" placeholder="Filter">
         <div id="file-list"></div>
-      </div>
+      </details>
 
-      <div class="sidebar-section queue-section">
-        <div class="sidebar-header">
+      <details class="sidebar-section sidebar-block queue-section">
+        <summary class="sidebar-header">
           <span>Queue</span>
           <button id="run-queue-btn" class="mini-action-btn" aria-label="Run queue">Run</button>
-        </div>
+        </summary>
         <div id="task-queue-list" class="task-queue-list"></div>
-      </div>
+      </details>
+
+      <details class="sidebar-section sidebar-block approvals-section">
+        <summary class="sidebar-header">
+          <span>Approvals</span>
+        </summary>
+        <div id="improvement-list" class="improvement-list"></div>
+      </details>
+
+      <details class="sidebar-section sidebar-block goals-section">
+        <summary class="sidebar-header">
+          <span>Guide</span>
+          <div class="sidebar-mini-actions">
+            <button id="assess-goals-btn" class="mini-action-btn" aria-label="Assess strengths and opportunities">Assess</button>
+            <button id="daily-guide-btn" class="mini-action-btn" aria-label="Refresh daily guide">Plan</button>
+          </div>
+        </summary>
+        <div id="goal-summary" class="goal-summary"></div>
+        <div id="business-profile" class="business-profile"></div>
+        <div id="opportunity-map" class="daily-guide-list"></div>
+        <div id="daily-guide-list" class="daily-guide-list"></div>
+      </details>
     </aside>
 
     <main id="main-content">
@@ -61,7 +83,10 @@
       <section id="chat-view" class="panel-view">
         <div id="chat-container">
           <div id="messages"></div>
-          <div id="tool-rail" class="tool-rail"></div>
+          <details id="tool-rail-wrap" class="tool-rail-wrap">
+            <summary>Tools</summary>
+            <div id="tool-rail" class="tool-rail"></div>
+          </details>
 
           <div id="update-notification" class="hidden">
             <div id="update-text">Checking for updates...</div>
